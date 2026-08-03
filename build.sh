@@ -132,6 +132,13 @@ strap() {
         git \
         base-devel
 
+    # The rootfs's own pacman.conf (shipped by the base package) has
+    # CheckSpace enabled. Inside a chroot pacman cannot resolve the
+    # cachedir's mount point, so its space check always fails. Disable it
+    # for all later arch-chroot pacman calls (build-time only - the rootfs
+    # is squashfs'd into the ISO, never booted directly).
+    run_quiet sed -i 's/^CheckSpace/#CheckSpace/' "${ROOTFS}/etc/pacman.conf"
+
     # NOTE: purge_gnu_coreutils is called from main() LAST, after the AUR
     # builds. On a fresh build the chroot still has GNU coreutils for makepkg;
     # on a resume build the plain-named uutils hard links satisfy makepkg, so
