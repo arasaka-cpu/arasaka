@@ -104,7 +104,7 @@ jobs:
           CH="${CHROOT_DIR}"
           sudo mkdir -p "${CH}/${REPO_DIR}"
           sudo cp -a "${GITHUB_WORKSPACE}/." "${CH}/${REPO_DIR}/"
-          sudo chown -R builder:builder "${CH}/${REPO_DIR}"
+          sudo chroot "${CH}" chown -R builder:builder "${REPO_DIR}"
           echo "repo copied to ${CH}/${REPO_DIR}"
 
       - name: Build rootfs (build.sh)
