@@ -932,7 +932,10 @@ configure_live_autologin() {
         usermod -aG render user 2>/dev/null || true
         # Live user password = "live" so sudo works interactively on the live
         # system. Keep autologin (no password needed to reach the desktop).
-        echo "user:live" | chpasswd
+        # usermod -p (not chpasswd): chpasswd uses PAM which aborts with
+        # "Critical error" inside a nested chroot (CI builds the rootfs while
+        # itself running in a chroot). usermod writes /etc/shadow directly.
+        usermod -p '$6$/Elg9RotmGAgGlOg$tcr.df/fx/i8lrHpsVC0g43F9ervTfY6.Uo75a0tFsFV2mpyIlkO6Spjff72gigUE1ov8k.qxvNztKLZ6Uxbq1' user 2>/dev/null || true
     '
 
     # Live + installed systems: let wheel members use sudo with their password.
