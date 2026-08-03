@@ -79,6 +79,7 @@ jobs:
             sudo tee "${CH}/etc/pacman.d/mirrorlist" >/dev/null
           sudo chroot "${CH}" /usr/bin/bash -c '
             set -euo pipefail
+            mkdir -p /var/cache/pacman/pkg
             pacman-key --init
             pacman-key --populate archlinux
             pacman -Sy --noconfirm
