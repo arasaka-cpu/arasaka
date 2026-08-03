@@ -877,11 +877,24 @@ configure_proton() {
         GE_VER="$1"
         GE_URL="$2"
         TMPD=$(mktemp -d)
-        echo "Downloading ${GE_VER} (~700 MB)..."
-        curl -fL --retry 3 -o "${TMPD}/${GE_VER}.tar.gz" "${GE_URL}"
-        curl -fsSL --retry 3 -o "${TMPD}/${GE_VER}.sha512sum" "${GE_URL}.sha512sum"
+        # GitHub release CDN intermittently 403s and --retry alone does NOT
+        # retry HTTP errors, so loop: download -> verify -> extract, nuking
+        # partials between attempts. A corrupt download is caught by the
+        # checksum and triggers a fresh attempt.
+        FOUND=0
+        for attempt in 1 2 3; do
+            echo "Downloading ${GE_VER} (~700 MB)... attempt ${attempt}/3"
+            rm -f "${TMPD}/${GE_VER}.tar.gz" "${TMPD}/${GE_VER}.sha512sum"
+            curl -fL --retry-all-errors --retry 5 --retry-delay 3 \
+                -o "${TMPD}/${GE_VER}.tar.gz" "${GE_URL}" || continue
+            curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 \
+                -o "${TMPD}/${GE_VER}.sha512sum" "${GE_URL}.sha512sum" || continue
+            ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ) || continue
+            FOUND=1
+            break
+        done
+        [ "${FOUND}" = 1 ] || { echo "GE-Proton download/checksum FAILED"; exit 1; }
         cd "${TMPD}"
-        sha512sum -c "${GE_VER}.sha512sum" || { echo "GE-Proton checksum FAILED"; exit 1; }
         tar -xzf "${GE_VER}.tar.gz"
         rm -rf '${ROOTFS}'/opt/GE-Proton
         mv "${GE_VER}" '${ROOTFS}'/opt/GE-Proton
