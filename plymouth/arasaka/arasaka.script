@@ -1,0 +1,159 @@
+# Arasaka NetWatch Terminal - a plymouth script theme.
+# Black terminal background, the Arasaka hex-logo, a scrolling
+# "corporate security" boot log and a thin progress bar.
+
+boot_started = false;
+progress = 0.0;
+message_index = 0;
+frame_count = 0;
+logo = null;
+messages = {};
+messages[0] = "ARASAKA BIOS v3.12.77 // SECURE BOOT INIT";
+messages[1] = "Authenticating identity: netwatch.dog@arasaka.jp";
+messages[2] = "Decrypting blackwall handshake...";
+messages[3] = "Verifying corporate ICE certificate...";
+messages[4] = "Loading neuralware interface drivers...";
+messages[5] = "Compiling chrome firmware checksums...";
+messages[6] = "Syncing relic chip memory banks...";
+messages[7] = "Releasing daemon threads to netrunners...";
+messages[8] = "ARASAKA A/B SLOT SELECT: OK";
+messages[9] = "Mounting encrypted corpo data vault...";
+messages[10] = "Disabling anti-tamper interlocks...";
+messages[11] = "Reliquary protocols nominal.";
+messages[12] = "Welcome to Arasaka OS.";
+
+message = null;
+terminal_bg = null;
+terminal_border = null;
+bar_track = null;
+bar_fill = null;
+bar_width = 0;
+bar_height = 0;
+
+fun update_message () {
+    if (message != null) {
+        message.SetOpacity(0);
+    }
+    if (!messages[message_index]) {
+        message_index = 0;
+    }
+    msg = messages[message_index];
+    message_index = message_index + 1;
+    label_image = Image.Text(msg, 0.16, 1.0, 0.0);
+    message = Sprite(label_image);
+    window_width = Window.GetWidth();
+    window_height = Window.GetHeight();
+    message.SetX((window_width - label_image.GetWidth()) / 2);
+    message.SetY(window_height * 0.68);
+    message.SetOpacity(1.0);
+}
+
+fun set_progress (fraction) {
+    if (bar_fill == null) { return; }
+    if (fraction < 0) { fraction = 0; }
+    if (fraction > 1) { fraction = 1; }
+    width = Math.Int(bar_width * fraction);
+    if (width < 1) { width = 1; }
+    bar_fill.SetImage(bar_fill_image.Scale(width, bar_height));
+}
+
+fun refresh_callback () {
+    frame_count = frame_count + 1;
+
+    # "blink" the message line in a terminal-ish way every ~1.5s
+    if (Math.Int(frame_count / 60) % 2 == 0) {
+        if (message != null) {
+            message.SetOpacity(0.85);
+        }
+    } else {
+        if (message != null) {
+            message.SetOpacity(0.55);
+        }
+    }
+
+    # subtle pulsing of the logo like an idle CRT
+    if (logo != null) {
+        opacity = 0.9 + 0.1 * Math.Sin(frame_count / 24.0);
+        logo.SetOpacity(opacity);
+    }
+
+    # advance the scrolling log every ~2.5s
+    if (Math.Int(frame_count / 150) > Math.Int((frame_count - 1) / 150)) {
+        update_message ();
+    }
+
+    Plymouth.SetRefreshFunction (refresh_callback);
+}
+
+fun boot_progress_callback (boot_progress) {
+    if (boot_progress >= 0) {
+        progress = boot_progress;
+    }
+    set_progress (progress);
+    Plymouth.SetBootProgressFunction (boot_progress_callback);
+}
+
+fun display_message_callback (message_to_display) {
+    display_message = message_to_display;
+    Plymouth.SetDisplayMessageFunction (display_message_callback);
+}
+
+window_width = Window.GetWidth ();
+window_height = Window.GetHeight ();
+
+# black terminal backdrop
+Window.SetBackgroundTopColor (0.0, 0.0, 0.0);
+Window.SetBackgroundBottomColor (0.05, 0.05, 0.08);
+
+# terminal window background (dark green tint)
+term_w = window_width * 0.86;
+term_h = window_height * 0.30;
+term_x = (window_width - term_w) / 2;
+term_y = window_height * 0.52;
+terminal_bg_image = Image ("./term.png").Scale(Math.Int(term_w), Math.Int(term_h));
+terminal_bg = Sprite (terminal_bg_image);
+terminal_bg.SetX (term_x);
+terminal_bg.SetY (term_y);
+
+# terminal box border (thin red frame drawn over the edges)
+border_w = window_width * 0.88;
+border_h = window_height * 0.33;
+border_x = (window_width - border_w) / 2;
+border_y = window_height * 0.505;
+terminal_border_image = Image ("./border.png").Scale(Math.Int(border_w), Math.Int(border_h));
+terminal_border = Sprite (terminal_border_image);
+terminal_border.SetX (border_x);
+terminal_border.SetY (border_y);
+
+# Arasaka logo at top center
+logo_image = Image ("./arasaka-logo.png");
+max_w = window_width * 0.55;
+scale = 1.0;
+if (logo_image.GetWidth () > max_w) {
+    scale = max_w / logo_image.GetWidth ();
+}
+logo_sprite_image = logo_image.Scale(Math.Int(logo_image.GetWidth () * scale), Math.Int(logo_image.GetHeight () * scale));
+logo = Sprite (logo_sprite_image);
+logo.SetX ((window_width - logo_sprite_image.GetWidth ()) / 2);
+logo.SetY (window_height * 0.08);
+
+# progress bar under the terminal (image-scaled, no ProgressBar object)
+bar_width = Math.Int(window_width * 0.5);
+bar_height = Math.Int(window_height * 0.012);
+bar_x = (window_width - bar_width) / 2;
+bar_y = Math.Int(window_height * 0.92);
+bar_track_image = Image ("./bar_track.png").Scale(bar_width, bar_height);
+bar_track = Sprite (bar_track_image);
+bar_track.SetX (bar_x);
+bar_track.SetY (bar_y);
+bar_fill_image = Image ("./bar_fill.png");
+bar_fill = Sprite (bar_fill_image.Scale(1, bar_height));
+bar_fill.SetX (bar_x);
+bar_fill.SetY (bar_y);
+
+Plymouth.SetRefreshFunction (refresh_callback);
+Plymouth.SetBootProgressFunction (boot_progress_callback);
+Plymouth.SetDisplayMessageFunction (display_message_callback);
+
+update_message ();
+set_progress (0);

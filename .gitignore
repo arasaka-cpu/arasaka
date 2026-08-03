@@ -1,0 +1,15 @@
+# --- secrets & local config (never commit) ---
+build.conf
+
+# --- build artifacts (huge: rootfs, squashfs, ISO) ---
+build/
+
+# --- VM / test artifacts ---
+*.qcow2
+*.qcow2.*
+ovmf_vars.fd
+*.iso
+
+# --- misc ---
+*.log
+.DS_Store

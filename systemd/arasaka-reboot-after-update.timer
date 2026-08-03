@@ -1,0 +1,12 @@
+[Unit]
+Description=Arasaka Reboot After Update Timer
+After=arasaka-update.timer
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1w
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

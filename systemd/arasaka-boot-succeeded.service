@@ -1,0 +1,12 @@
+[Unit]
+Description=Arasaka A/B Boot Success (commit pending slot swap)
+After=display-manager.service systemd-user-sessions.service
+RequiresMountsFor=/boot
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/arasaka-boot-succeeded.sh
+
+[Install]
+WantedBy=multi-user.target

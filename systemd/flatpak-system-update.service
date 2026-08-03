@@ -1,0 +1,17 @@
+[Unit]
+Description=Flatpak System-Wide Auto-Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flatpak update --system --noninteractive
+# Refresh the desktop file / icon databases so COSMIC's app menu picks up the
+# flatpak exports (apps sometimes show without icons until these are rebuilt).
+ExecStart=/usr/bin/update-desktop-database /var/lib/flatpak/exports/share/applications
+ExecStart=/usr/bin/gtk-update-icon-cache -f /var/lib/flatpak/exports/share/icons/hicolor
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

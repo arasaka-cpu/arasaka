@@ -1,0 +1,10 @@
+[Unit]
+Description=Arasaka Reboot After Update
+After=arasaka-update.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arasaka-reboot-after-update.sh
+
+[Install]
+WantedBy=multi-user.target

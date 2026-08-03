@@ -1,0 +1,40 @@
+---
+componentName:  arasaka
+
+welcomeStyleCalamares:   false
+welcomeExpandingLogo:   true
+
+windowExpanding:    normal
+windowSize: 800px,520px
+windowPlacement: center
+
+sidebar: widget
+navigation: widget
+
+strings:
+    productName:         Arasaka
+    shortProductName:    Arasaka
+    version:             2026.08
+    shortVersion:        2026.08
+    versionedName:       Arasaka 2026.08
+    shortVersionedName:  Arasaka 2026.08
+    bootloaderEntryName: Arasaka
+    productUrl:          ""
+    supportUrl:          ""
+    knownIssuesUrl:      ""
+    releaseNotesUrl:     ""
+    donateUrl:           ""
+
+images:
+    productIcon:         "logo.png"
+    productLogo:         "logo.png"
+    productWelcome:      "logo.png"
+
+style:
+   SidebarBackground:        "#1A1A2E"
+   SidebarText:              "#FFFFFF"
+   SidebarTextCurrent:       "#1A1A2E"
+   SidebarBackgroundCurrent: "#D35400"
+
+slideshow:               "show.qml"
+slideshowAPI: 2

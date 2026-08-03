@@ -1,0 +1,13 @@
+#!/bin/sh
+# arasaka-ab - install hook for mkinitcpio.
+# Ships the A/B root-selection hook into the initramfs.
+
+build() {
+    add_runscript
+}
+
+help() {
+    cat << EOF
+  arasaka-ab  - Arasaka A/B slot root selection with rollback protection.
+EOF
+}

@@ -1,0 +1,115 @@
+#!/bin/sh
+# arasaka-ab - Arasaka A/B slot root selection with rollback protection.
+#
+# Replaces the default initramfs root mount: mounts the boot partition,
+# reads the active A/B slot marker, and mounts the active slot's root
+# partition (raw ext4, by label) as the real root. If a slot swap is
+# pending but the new slot's boot was not confirmed (swap-tried marker
+# left by an earlier, unsuccessful boot) the previous slot is restored
+# first - i.e. a slot is only ever adopted after it boots successfully.
+#
+# On a fresh install (no pending swap) this behaves like the stock
+# mkinitcpio mount handler, using the kernel cmdline root= as a fallback.
+
+run_hook() {
+    mount_handler=arasaka_ab_mount
+}
+
+find_boot_partition() {
+    if [ -b /dev/disk/by-label/arasaka-boot ]; then
+        echo /dev/disk/by-label/arasaka-boot
+        return 0
+    fi
+    if [ -b /dev/disk/by-partlabel/arasaka-boot ]; then
+        echo /dev/disk/by-partlabel/arasaka-boot
+        return 0
+    fi
+    return 1
+}
+
+find_slot_partition() {
+    # $1 = slot letter (a|b)
+    if [ -b "/dev/disk/by-label/arasaka-slot-$1" ]; then
+        echo "/dev/disk/by-label/arasaka-slot-$1"
+        return 0
+    fi
+    if [ -b "/dev/disk/by-partlabel/arasaka-slot-$1" ]; then
+        echo "/dev/disk/by-partlabel/arasaka-slot-$1"
+        return 0
+    fi
+    return 1
+}
+
+try_mount_slot() {
+    # $1 = slot letter, $2 = newroot
+    local slot="$1" newroot="$2" rootdev
+    rootdev="$(find_slot_partition "$slot")" || return 1
+    [ -b "$rootdev" ] || return 1
+    mkdir -p "$newroot"
+    mount -o rw "$rootdev" "$newroot" 2>/dev/null || return 1
+    mkdir -p "$newroot/etc/arasaka" 2>/dev/null
+    echo "$slot" > "$newroot/etc/arasaka/booted-slot" 2>/dev/null || true
+    return 0
+}
+
+arasaka_ab_mount() {
+    NEWROOT="$1"
+    local bootdev slot prev abmnt
+    abmnt=/ab
+    bootdev="$(find_boot_partition)" || bootdev=""
+    slot="a"
+    prev="a"
+
+    # Read A/B state from the boot partition. prev is only meaningful when a
+    # swap is pending.
+    if [ -n "$bootdev" ]; then
+        mkdir -p "$abmnt"
+        if mount -o rw "$bootdev" "$abmnt" 2>/dev/null; then
+            slot="$(cat "$abmnt/ab/active-slot" 2>/dev/null || echo a)"
+            prev="$(cat "$abmnt/ab/swap-pending" 2>/dev/null || echo "$slot")"
+
+            if [ -f "$abmnt/ab/swap-pending" ] && [ -f "$abmnt/ab/swap-tried" ]; then
+                # A previous boot of the new slot never confirmed success:
+                # roll back to the last known-good slot before mounting.
+                msg "Arasaka A/B: slot $slot boot was NOT confirmed - rolling back to slot $prev"
+                echo "$prev" > "$abmnt/ab/active-slot"
+                rm -f "$abmnt/ab/swap-pending" "$abmnt/ab/swap-tried"
+                slot="$prev"
+            elif [ -f "$abmnt/ab/swap-pending" ]; then
+                # First boot after an update: adopt the new slot, but leave a
+                # marker so a later boot can detect that it was never confirmed.
+                msg "Arasaka A/B: trial boot of new slot $slot (commit on success)"
+                echo 1 > "$abmnt/ab/swap-tried"
+            fi
+            umount "$abmnt" 2>/dev/null
+        else
+            msg "Arasaka A/B: could not mount boot partition; using cmdline root"
+        fi
+    else
+        msg "Arasaka A/B: no boot partition found; using cmdline root"
+    fi
+
+    if [ -n "$slot" ] && try_mount_slot "$slot" "$NEWROOT"; then
+        msg "Arasaka A/B: mounted slot $slot at $NEWROOT"
+        return 0
+    fi
+
+    # The active slot failed to mount while a swap was pending: roll back to
+    # the previous slot instead of wedging on a bad update.
+    if [ -n "$bootdev" ] && [ -n "$prev" ] && [ "$prev" != "$slot" ]; then
+        msg "Arasaka A/B: failed to mount slot $slot - rolling back to slot $prev"
+        mkdir -p "$abmnt"
+        if mount -o rw "$bootdev" "$abmnt" 2>/dev/null; then
+            echo "$prev" > "$abmnt/ab/active-slot"
+            rm -f "$abmnt/ab/swap-pending" "$abmnt/ab/swap-tried"
+            umount "$abmnt" 2>/dev/null
+        fi
+        if try_mount_slot "$prev" "$NEWROOT"; then
+            msg "Arasaka A/B: mounted previous slot $prev at $NEWROOT"
+            return 0
+        fi
+    fi
+
+    msg "Arasaka A/B: falling back to default mount handler"
+    default_mount_handler "$NEWROOT"
+}
