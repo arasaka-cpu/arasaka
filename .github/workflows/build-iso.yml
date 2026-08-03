@@ -1,0 +1,167 @@
+# Builds the Arasaka ISO and uploads it to Backblaze B2.
+#
+# The build scripts require a real Arch Linux environment running as a
+# non-root user with sudo, and peak at ~35 GB of disk. This workflow:
+#   1. frees space on an ubuntu-latest runner,
+#   2. bootstraps an Arch Linux chroot into it,
+#   3. runs build.sh + create-iso.sh inside the chroot as an unprivileged
+#      builder user (passwordless sudo),
+#   4. uploads the resulting .iso to B2, keeping only the newest ones.
+#
+# Required repo secrets: B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET
+
+name: Build Arasaka ISO
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'   # weekly Monday 04:17 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arasaka-iso
+  cancel-in-progress: true
+
+env:
+  CHROOT_DIR: /tmp/arch/root.x86_64
+  REPO_DIR: /home/builder/arasaka
+  DUMMY_SUDO_PW: ci
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space on runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          docker-images: true
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show free disk
+        run: df -h /
+
+      - name: Bootstrap Arch Linux chroot
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q zstd
+          sudo mkdir -p /tmp/arch
+          cd /tmp/arch
+          echo "Downloading Arch bootstrap tarball..."
+          curl -fL --retry 3 -o bootstrap.tar.zst \
+            https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst
+          sudo tar --zstd -xf bootstrap.tar.zst
+          sudo rm bootstrap.tar.zst
+          echo "chroot ready at ${CHROOT_DIR}"
+
+      - name: Initialize chroot (keyring, base, tools)
+        run: |
+          set -euo pipefail
+          CH="${CHROOT_DIR}"
+          sudo mkdir -p "${CH}"/{proc,sys,dev,run,home/builder}
+          sudo mount --bind /proc "${CH}/proc"
+          sudo mount --bind /sys  "${CH}/sys"
+          sudo mount --bind /dev  "${CH}/dev"
+          sudo mount --bind /run  "${CH}/run"
+          sudo cp /etc/resolv.conf "${CH}/etc/resolv.conf"
+          echo "Server = https://geo.mirror.pkgbuild.com/\$repo/os/\$arch" | \
+            sudo tee "${CH}/etc/pacman.d/mirrorlist" >/dev/null
+          sudo chroot "${CH}" /usr/bin/bash -c '
+            set -euo pipefail
+            pacman-key --init
+            pacman-key --populate archlinux
+            pacman -Sy --noconfirm
+            pacman -S --noconfirm --needed \
+              base arch-install-scripts sudo base-devel git rsync curl \
+              squashfs-tools dosfstools mtools xorriso parted efibootmgr \
+              e2fsprogs btrfs-progs
+            useradd -m -s /bin/bash builder
+            echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+            chmod 440 /etc/sudoers.d/builder
+            pacman -Scc --noconfirm || true
+          '
+          echo "chroot initialized"
+
+      - name: Copy repository into chroot
+        run: |
+          set -euo pipefail
+          CH="${CHROOT_DIR}"
+          sudo mkdir -p "${CH}/${REPO_DIR}"
+          sudo cp -a "${GITHUB_WORKSPACE}/." "${CH}/${REPO_DIR}/"
+          sudo chown -R builder:builder "${CH}/${REPO_DIR}"
+          echo "repo copied to ${CH}/${REPO_DIR}"
+
+      - name: Build rootfs (build.sh)
+        run: |
+          set -euo pipefail
+          sudo chroot "${CHROOT_DIR}" /usr/bin/su - builder -c \
+            'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" ./build.sh'
+
+      - name: Build ISO (create-iso.sh)
+        run: |
+          set -euo pipefail
+          sudo chroot "${CHROOT_DIR}" /usr/bin/su - builder -c \
+            'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" ./create-iso.sh'
+
+      - name: Copy ISO out of chroot
+        run: |
+          set -euo pipefail
+          sudo cp "${CHROOT_DIR}/${REPO_DIR}"/build/*.iso "${GITHUB_WORKSPACE}/" 
+          sudo chown "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}"/arasaka-*.iso
+          ls -lh "${GITHUB_WORKSPACE}"/arasaka-*.iso
+
+      - name: Upload ISO to Backblaze B2
+        env:
+          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$B2_APPLICATION_KEY_ID" ] || [ -z "$B2_APPLICATION_KEY" ] || [ -z "$B2_BUCKET" ]; then
+            echo "::error::B2 secrets not configured. Add B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET."
+            exit 1
+          fi
+          sudo apt-get install -y -q rclone
+          rclone config create arasaka-b2 b2 \
+            account "$B2_APPLICATION_KEY_ID" \
+            key "$B2_APPLICATION_KEY" \
+            hard_delete true
+          NEW=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso | head -1)
+          echo "Uploading ${NEW} to b2://${B2_BUCKET}/..."
+          rclone copy "$NEW" "arasaka-b2:${B2_BUCKET}/" --progress
+          # Free-tier storage is 10 GB; keep only the 2 newest ISOs.
+          rclone lsf "arasaka-b2:${B2_BUCKET}/" --include '*.iso' --files-only | \
+            grep '^arasaka-' | sort -r | tail -n +3 | while read -r OLD; do
+              echo "Removing old ISO: ${OLD}"
+              rclone delete "arasaka-b2:${B2_BUCKET}/${OLD}"
+            done
+          echo "::notice::ISO uploaded to Backblaze B2 bucket ${B2_BUCKET}"
+
+      - name: Generate shareable download link
+        if: always()
+        env:
+          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+        run: |
+          set -euo pipefail
+          FILE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso 2>/dev/null | head -1 | xargs basename)
+          [ -n "$FILE" ] || { echo "no iso to link"; exit 0; }
+          python3 -m pip install --user -q --break-system-packages b2 2>/dev/null || true
+          export PATH="$HOME/.local/bin:$PATH"
+          B2_APPLICATION_KEY_ID="$B2_APPLICATION_KEY_ID" \
+          B2_APPLICATION_KEY="$B2_APPLICATION_KEY" \
+            b2 get-download-url-with-auth "$B2_BUCKET" "$FILE" --duration 604800 \
+          | sed 's/^/Download link (7 days): /' || \
+            echo "Could not generate signed URL (file is in bucket as $FILE)"
