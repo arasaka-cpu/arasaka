@@ -28,6 +28,7 @@ die() { log "FATAL: $*"; exit 1; }
 # Always pipe the password so sudo never prompts/locks mid-build.
 run() { echo "$PASSWORD" | sudo -S "$@" 2>/dev/null; }
 run_quiet() { echo "$PASSWORD" | sudo -S "$@" >/dev/null 2>&1; }
+run_verbose() { echo "$PASSWORD" | sudo -S "$@"; }
 
 # Write a heredoc to a file as root (works with << EOF).
 # Usage: wtee /path/to/file << 'EOF' ... EOF
