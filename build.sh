@@ -924,6 +924,12 @@ MML
 configure_live_autologin() {
     log "Creating live user + COSMIC autologin (live only)..."
 
+    # SHA-512 hash of the live password "live". usermod -p (not chpasswd):
+    # chpasswd uses PAM which aborts with "Critical error" inside a nested
+    # chroot (CI builds the rootfs while itself running in a chroot).
+    # usermod writes /etc/shadow directly.
+    local LIVE_PW_HASH='$6$/Elg9RotmGAgGlOg$tcr.df/fx/i8lrHpsVC0g43F9ervTfY6.Uo75a0tFsFV2mpyIlkO6Spjff72gigUE1ov8k.qxvNztKLZ6Uxbq1'
+
     run arch-chroot "${ROOTFS}" /bin/bash -c '
         useradd -m -u 1000 -g users -G wheel,video,render,audio,input,storage,power -s /usr/bin/zsh user 2>/dev/null || true
         # RESUME builds skip useradd (user exists) - grant render access anyway,
@@ -932,10 +938,7 @@ configure_live_autologin() {
         usermod -aG render user 2>/dev/null || true
         # Live user password = "live" so sudo works interactively on the live
         # system. Keep autologin (no password needed to reach the desktop).
-        # usermod -p (not chpasswd): chpasswd uses PAM which aborts with
-        # "Critical error" inside a nested chroot (CI builds the rootfs while
-        # itself running in a chroot). usermod writes /etc/shadow directly.
-        usermod -p '$6$/Elg9RotmGAgGlOg$tcr.df/fx/i8lrHpsVC0g43F9ervTfY6.Uo75a0tFsFV2mpyIlkO6Spjff72gigUE1ov8k.qxvNztKLZ6Uxbq1' user 2>/dev/null || true
+        usermod -p "'"$LIVE_PW_HASH"'" user 2>/dev/null || true
     '
 
     # Live + installed systems: let wheel members use sudo with their password.
