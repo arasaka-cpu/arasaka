@@ -294,7 +294,7 @@ build_initramfs() {
         log "Installing mkinitcpio-archiso into ISO staging..."
         chroot_iso "${ISO_DIR}/arch/x86_64/airootfs" /bin/bash -c '
             pacman -S --noconfirm --needed mkinitcpio-archiso 2>&1 || true
-        ' 2>&1 | tee /dev/stderr || true
+        ' 2>&1 || true
     else
         log "archiso hooks already present in staging."
     fi
@@ -426,7 +426,7 @@ build_iso() {
     local efi_load_size
     efi_load_size=$(( ($(stat -c %s "${ISO_DIR}/EFI/boot/efiboot.img") + 511) / 512 ))
 
-    run xorriso -as mkisofs \
+    run_verbose xorriso -as mkisofs \
         -iso-level 3 \
         -full-iso9660-filenames \
         -volid "ARASAKA" \
@@ -440,7 +440,7 @@ build_iso() {
             -e EFI/boot/efiboot.img \
             -no-emul-boot \
             -boot-load-size "${efi_load_size}" \
-        "${ISO_DIR}" 2>&1 | tee -a /dev/stderr
+        "${ISO_DIR}"
 
     local iso_size_final
     iso_size_final=$(du -sb "${OUTPUT}" | cut -f1)
