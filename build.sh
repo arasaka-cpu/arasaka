@@ -103,7 +103,7 @@ strap() {
         zram-generator \
         dosfstools \
         btrfs-progs \
-        xcb-cursor \
+        xcb-util-cursor \
         bluez \
         bluez-utils \
         mesa \
