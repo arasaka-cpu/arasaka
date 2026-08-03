@@ -868,18 +868,25 @@ configure_proton() {
     # zero Steam: STEAM_COMPAT_CLIENT_INSTALL_PATH + STEAM_COMPAT_DATA_PATH +
     # "proton run". DXVK/vkd3d-proton are AUR-only as pacman packages, so GE's
     # bundled copies are the reliable preinstalled option.
+    # GE-VER/GE_URL are passed as positional args ($1/$2) so the inner script
+    # never relies on host-side ${...} expansion mid-string (a quote-break bug
+    # here expanded ${TMPD} on the host to "", writing the tarball to / and
+    # making sha512sum -c look for the sidecar in the wrong dir -> FAILED).
     run bash -c '
+        set -e
+        GE_VER="$1"
+        GE_URL="$2"
         TMPD=$(mktemp -d)
-        echo "Downloading '${GE_VER}' (~700 MB)..."
-        curl -fL --retry 3 -o "${TMPD}/'${GE_VER}'.tar.gz" "'${GE_URL}'"
-        curl -fsSL --retry 3 -o "${TMPD}/'${GE_VER}'.sha512sum" "'${GE_URL}'.sha512sum"
+        echo "Downloading ${GE_VER} (~700 MB)..."
+        curl -fL --retry 3 -o "${TMPD}/${GE_VER}.tar.gz" "${GE_URL}"
+        curl -fsSL --retry 3 -o "${TMPD}/${GE_VER}.sha512sum" "${GE_URL}.sha512sum"
         cd "${TMPD}"
-        sha512sum -c "'${GE_VER}'.sha512sum" || { echo "GE-Proton checksum FAILED"; exit 1; }
-        tar -xzf "'${GE_VER}'.tar.gz"
+        sha512sum -c "${GE_VER}.sha512sum" || { echo "GE-Proton checksum FAILED"; exit 1; }
+        tar -xzf "${GE_VER}.tar.gz"
         rm -rf '${ROOTFS}'/opt/GE-Proton
-        mv "'${GE_VER}'" '${ROOTFS}'/opt/GE-Proton
+        mv "${GE_VER}" '${ROOTFS}'/opt/GE-Proton
         rm -rf "${TMPD}"
-    '
+    ' _ "$GE_VER" "$GE_URL"
 
     run arch-chroot "${ROOTFS}" /bin/bash -c '
         chmod -R a+rX /opt/GE-Proton
