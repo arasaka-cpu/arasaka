@@ -872,7 +872,10 @@ configure_proton() {
     # never relies on host-side ${...} expansion mid-string (a quote-break bug
     # here expanded ${TMPD} on the host to "", writing the tarball to / and
     # making sha512sum -c look for the sidecar in the wrong dir -> FAILED).
-    run bash -c '
+    # Runs WITHOUT sudo (no run): this block only writes to the builder-owned
+    # rootfs, and dropping sudo means curl's stderr is not swallowed by run()'s
+    # 2>/dev/null - a failed download shows the real reason in the log.
+    bash -c '
         set -e
         GE_VER="$1"
         GE_URL="$2"
@@ -888,13 +891,14 @@ configure_proton() {
         for attempt in 1 2 3; do
             echo "Downloading ${GE_VER} (~700 MB)... attempt ${attempt}/3"
             rm -f "${TMPD}/${GE_VER}.tar.gz" "${TMPD}/${GE_VER}.sha512sum"
-            curl -fL --retry-all-errors --retry 5 --retry-delay 3 \
-                -o "${TMPD}/${GE_VER}.tar.gz" "${GE_URL}" || continue
-            curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 \
-                -o "${TMPD}/${GE_VER}.sha512sum" "${GE_URL}.sha512sum" || continue
-            ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ) || continue
-            FOUND=1
-            break
+            if curl -fL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
+                    -o "${TMPD}/${GE_VER}.tar.gz" "${GE_URL}" \
+                && curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
+                    -o "${TMPD}/${GE_VER}.sha512sum" "${GE_URL}.sha512sum" \
+                && ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ); then
+                FOUND=1
+                break
+            fi
         done
         # GitHub release CDN intermittently blocks runner IPs (HTTP 403/429 on
         # release-assets.githubusercontent.com). If B2 creds are provided (CI),
@@ -905,21 +909,24 @@ configure_proton() {
             for attempt in 1 2 3; do
                 rm -f "${TMPD}/${GE_VER}.tar.gz" "${TMPD}/${GE_VER}.sha512sum"
                 AUTH=$(curl -fsS -u "${B2_APPLICATION_KEY_ID}:${B2_APPLICATION_KEY}" \
-                    "https://api.backblazeb2.com/b2api/v3/b2_authorize_account") || continue
+                    "https://api.backblazeb2.com/b2api/v3/b2_authorize_account" 2>&1) \
+                    || { echo "  B2 authorize failed"; continue; }
                 B2_TOKEN=$(echo "${AUTH}" | sed -n "s/.*\"authorizationToken\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
                 B2_DLURL=$(echo "${AUTH}" | sed -n "s/.*\"downloadUrl\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+                echo "  B2 authorized: token ${#B2_TOKEN} chars, dlurl ${B2_DLURL}"
                 [ -n "${B2_TOKEN}" ] && [ -n "${B2_DLURL}" ] || continue
-                curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 \
-                    -H "Authorization: ${B2_TOKEN}" \
-                    -o "${TMPD}/${GE_VER}.sha512sum" \
-                    "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.sha512sum" || continue
-                curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 \
-                    -H "Authorization: ${B2_TOKEN}" \
-                    -o "${TMPD}/${GE_VER}.tar.gz" \
-                    "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.tar.gz" || continue
-                ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ) || continue
-                FOUND=1
-                break
+                if curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
+                        -H "Authorization: ${B2_TOKEN}" \
+                        -o "${TMPD}/${GE_VER}.sha512sum" \
+                        "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.sha512sum" \
+                    && curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
+                        -H "Authorization: ${B2_TOKEN}" \
+                        -o "${TMPD}/${GE_VER}.tar.gz" \
+                        "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.tar.gz" \
+                    && ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ); then
+                    FOUND=1
+                    break
+                fi
             done
         fi
         [ "${FOUND}" = 1 ] || { echo "GE-Proton download/checksum FAILED (GitHub + B2)"; exit 1; }
