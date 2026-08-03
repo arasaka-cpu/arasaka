@@ -108,10 +108,18 @@ jobs:
           echo "repo copied to ${CH}/${REPO_DIR}"
 
       - name: Build rootfs (build.sh)
+        env:
+          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
         run: |
           set -euo pipefail
           sudo chroot "${CHROOT_DIR}" /usr/bin/su - builder -c \
-            'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" ./build.sh'
+            'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" \
+             B2_APPLICATION_KEY_ID="'"${B2_APPLICATION_KEY_ID}"'" \
+             B2_APPLICATION_KEY="'"${B2_APPLICATION_KEY}"'" \
+             B2_BUCKET="'"${B2_BUCKET}"'" \
+             ./build.sh'
 
       - name: Build ISO (create-iso.sh)
         run: |
