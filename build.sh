@@ -82,6 +82,7 @@ strap() {
         iana-etc \
         networkmanager \
         flatpak \
+        dconf \
         xdg-desktop-portal-cosmic \
         cosmic \
         cosmic-applets \
@@ -842,6 +843,9 @@ DDB
         # Flatpak overrides (system-wide, all users): expose GTK config,
         # ~/.themes and ~/.icons read-only, and force the dark libadwaita
         # theme so every flatpak matches COSMIC.
+        # NOTE: /var/lib/flatpak/overrides is NOT created by flatpak install -
+        # the dir must exist or both the cat and the chmod below fail.
+        mkdir -p /var/lib/flatpak/overrides
         cat > /var/lib/flatpak/overrides/global << 'FOVR'
 [Environment]
 GTK_THEME=adw-gtk3-dark
