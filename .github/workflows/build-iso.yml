@@ -56,7 +56,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -q
           sudo apt-get install -y -q zstd
-          sudo mkdir -p /tmp/arch
+          mkdir -p /tmp/arch
           cd /tmp/arch
           echo "Downloading Arch bootstrap tarball..."
           curl -fL --retry 3 -o bootstrap.tar.zst \
