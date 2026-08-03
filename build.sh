@@ -118,7 +118,6 @@ strap() {
         xf86-video-nouveau \
         plymouth \
         apparmor \
-        snapd \
         fuse3 \
         cups \
         foomatic-db \
