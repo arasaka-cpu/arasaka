@@ -111,13 +111,15 @@ jobs:
       # B2. Both intermittently refuse the runner egress IP (404/403), so we
       # stage it once into the Actions cache (GitHub's own service, always
       # reachable) and serve it to every build from there.
-      - name: Cache GE-Proton tarball
-        uses: actions/cache@v4
+      - name: Restore GE-Proton cache
+        id: restore-geproton
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/GE-Proton
-          key: ge-proton-v1-GE-Proton11-3
+          key: ge-proton-v1-GE-Proton11-3-ok
 
       - name: Fetch GE-Proton if not cached (best effort)
+        id: fetch
         env:
           B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
           B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
@@ -128,6 +130,7 @@ jobs:
           GE_URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${GE_VER}/${GE_VER}.tar.gz"
           DIR=/tmp/GE-Proton
           mkdir -p "$DIR"
+          echo "downloaded=no" >> "$GITHUB_OUTPUT"
           if [ -s "$DIR/${GE_VER}.tar.gz" ] && ( cd "$DIR" && sha512sum -c "${GE_VER}.sha512sum" ); then
             echo "GE-Proton present in cache"
           else
@@ -152,10 +155,21 @@ jobs:
             fi
             if [ -s "$DIR/${GE_VER}.tar.gz" ] && ( cd "$DIR" && sha512sum -c "${GE_VER}.sha512sum" ); then
               echo "GE-Proton staged OK (will be cached for future runs)."
+              echo "downloaded=ok" >> "$GITHUB_OUTPUT"
             else
+              # Leave nothing behind so a failed run can never poison the
+              # -ok cache key (we only save under that key on success anyway).
+              rm -f "$DIR/${GE_VER}.tar.gz" "$DIR/${GE_VER}.sha512sum"
               echo "::warning::Could not stage GE-Proton (GitHub + B2 refused). build.sh will retry with full diagnostics."
             fi
           fi
+
+      - name: Save GE-Proton cache
+        if: steps.fetch.outputs.downloaded == 'ok'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/GE-Proton
+          key: ge-proton-v1-GE-Proton11-3-ok
 
       - name: Copy GE-Proton into chroot
         run: |
