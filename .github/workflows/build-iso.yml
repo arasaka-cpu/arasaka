@@ -289,7 +289,7 @@ jobs:
               curl_json(["-H", f"Authorization: {token}",
                   f"{api_url}/b2api/v3/b2_delete_file_version",
                   "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})])
-          print(f"::notice::ISO uploaded to Backblaze B2 bucket {B2_BUCKET}")
+          print(f"::notice::ISO uploaded to Backblaze B2 bucket {BUCKET}")
           PY
 
       - name: Generate shareable download link
