@@ -238,9 +238,6 @@ jobs:
           bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
           print(f"bucket {BUCKET} id {bucket_id}")
           
-          # Copy the file to avoid large downloads
-          # For large files, stream them directly to curl to avoid memory issues
-          # We need to copy the file first to read its hash, then stream it for upload
           file_name = os.path.basename(ISO)
 
           # Get upload URL
@@ -251,37 +248,35 @@ jobs:
           if not up_token:
               raise SystemExit("no token in get_upload_url response: " + json.dumps(up)[:400])
 
-          # Stream file upload to avoid memory issues
-          import tempfile, hashlib
+          # Compute the SHA-1 by streaming over the file (constant memory).
           sha1 = hashlib.sha1()
-          
-          # Compute hash and write to temp file
-          with open(ISO, "rb") as src, tempfile.NamedTemporaryFile(delete=False) as tmp:
-              for chunk in iter(lambda: src.read(8192), b''):
+          with open(ISO, "rb") as src:
+              for chunk in iter(lambda: src.read(1 << 20), b""):
                   sha1.update(chunk)
-                  tmp.write(chunk)
-              tmp_path = tmp.name
 
-          # Upload with hash and content in a single pass
-          cmd = ["curl", "-sS", "-w", "\n%{http_code}",
-                 "-H", f"Authorization: {up_token}",
-                 "-H", f"X-Bz-File-Name: {file_name}",
-                 "-H", f"X-Bz-Content-Sha1: {sha1.hexdigest()}",
-                 "-H", "Content-Type: application/octet-stream",
-                 "--data-binary", "@/dev/stdin",
-                 f"{up['uploadUrl']}"]
-          
-          p = subprocess.run(cmd, stdin=open(tmp_path, "rb"), capture_output=True)
-          import os
-          os.unlink(tmp_path)
-          
-          out = p.stdout.decode(errors="replace")
-          code = out.rsplit("\n", 1)[-1].strip() if out else ""
-          if p.returncode != 0 or not code.startswith("2"):
-              print("upload failed:", p.stderr.decode(errors="replace"), "http", code, file=sys.stderr)
-              raise subprocess.CalledProcessError(p.returncode if p.returncode else int(code), cmd, (p.stderr + p.stdout)[:800])
-          
-          result = json.loads(out.rsplit("\n", 1)[0])
+          # Upload with http.client, which streams the file body in 8 KiB
+          # blocks instead of buffering it (curl --data-binary spools the whole
+          # ISO to memory and OOMs on the 5 GB file).
+          import http.client, urllib.parse
+          u = urllib.parse.urlsplit(up["uploadUrl"])
+          conn = http.client.HTTPSConnection(u.hostname, timeout=3600)
+          headers = {
+              "Authorization": up_token,
+              "X-Bz-File-Name": urllib.parse.quote(file_name, safe=""),
+              "X-Bz-Content-Sha1": sha1.hexdigest(),
+              "Content-Type": "application/octet-stream",
+              "Content-Length": str(os.path.getsize(ISO)),
+          }
+          with open(ISO, "rb") as src:
+              conn.request("POST", u.path, body=src, headers=headers)
+          resp = conn.getresponse()
+          body = resp.read()
+          conn.close()
+          if resp.status != 200:
+              print(f"upload failed: HTTP {resp.status}: "
+                    + body.decode(errors="replace")[:600], file=sys.stderr)
+              raise SystemExit(1)
+          result = json.loads(body)
           print(f"uploaded {file_name} ({result.get('contentLength')} bytes) fileId {result['fileId']}")
           
           listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
