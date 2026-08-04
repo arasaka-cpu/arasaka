@@ -163,7 +163,7 @@ jobs:
           if [ -s /tmp/GE-Proton/GE-Proton11-3.tar.gz ]; then
             sudo mkdir -p "${CHROOT_DIR}/tmp/GE-Proton"
             sudo cp /tmp/GE-Proton/GE-Proton11-3* "${CHROOT_DIR}/tmp/GE-Proton/"
-            sudo chown -R builder:builder "${CHROOT_DIR}/tmp/GE-Proton"
+            sudo chroot "${CHROOT_DIR}" chown -R builder:builder /tmp/GE-Proton
             echo "GE-Proton copied into chroot at /tmp/GE-Proton"
           else
             echo "No staged GE-Proton - build.sh will download."
