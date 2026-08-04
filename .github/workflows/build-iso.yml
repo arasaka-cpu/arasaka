@@ -108,68 +108,26 @@ jobs:
           echo "repo copied to ${CH}/${REPO_DIR}"
 
       # GE-Proton (~508 MB) is hosted on the GitHub release CDN and mirrored on
-      # B2. Both intermittently refuse the runner egress IP (404/403), so we
-      # stage it once into the Actions cache (GitHub's own service, always
-      # reachable) and serve it to every build from there.
-      - name: Restore GE-Proton cache
-        id: restore-geproton
-        uses: actions/cache/restore@v4
+      # B2, but BOTH intermittently refuse the runner egress IP (404/403).
+      # github.com itself is always reachable from runners (checkout works), so
+      # the tarball is committed to the ge-proton-mirror repo as six ~89 MB git
+      # chunks and reassembled here - fully deterministic, no external host.
+      - name: Checkout GE-Proton mirror
+        uses: actions/checkout@v4
         with:
-          path: /tmp/GE-Proton
-          key: ge-proton-v1-GE-Proton11-3-ok
+          repository: arasaka-cpu/ge-proton-mirror
+          path: ge-proton-mirror
 
-      - name: Fetch GE-Proton if not cached (best effort)
-        id: fetch
-        env:
-          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
-          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+      - name: Assemble GE-Proton from mirror chunks
         run: |
-          set -uo pipefail
-          GE_VER=GE-Proton11-3
-          GE_URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${GE_VER}/${GE_VER}.tar.gz"
-          DIR=/tmp/GE-Proton
-          mkdir -p "$DIR"
-          echo "downloaded=no" >> "$GITHUB_OUTPUT"
-          if [ -s "$DIR/${GE_VER}.tar.gz" ] && ( cd "$DIR" && sha512sum -c "${GE_VER}.sha512sum" ); then
-            echo "GE-Proton present in cache"
-          else
-            echo "Cache miss - downloading GE-Proton (best effort; build.sh retries with full diagnostics if this fails)..."
-            fetch() { curl -fL --retry-all-errors --retry 5 --retry-delay 3 "$@"; }
-            if fetch -o "$DIR/${GE_VER}.tar.gz" "$GE_URL" \
-                && fetch -o "$DIR/${GE_VER}.sha512sum" "${GE_URL}.sha512sum"; then
-              echo "Downloaded from GitHub."
-            else
-              echo "GitHub download failed - trying Backblaze B2 mirror (bucket: ${B2_BUCKET:-unset})..."
-              rm -f "$DIR/${GE_VER}.tar.gz" "$DIR/${GE_VER}.sha512sum"
-              AUTH=$(curl -fsS -u "${B2_APPLICATION_KEY_ID:-}:${B2_APPLICATION_KEY:-}" \
-                "https://api.backblazeb2.com/b2api/v3/b2_authorize_account" 2>&1) || AUTH=""
-              TOKEN=$(echo "$AUTH" | sed -n 's/.*"authorizationToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-              DLURL=$(echo "$AUTH" | sed -n 's/.*"downloadUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-              [ -n "$TOKEN" ] && [ -n "$DLURL" ] && {
-                fetch -H "Authorization: $TOKEN" -o "$DIR/${GE_VER}.sha512sum" \
-                  "$DLURL/file/${B2_BUCKET:-}/proton-ge/${GE_VER}.sha512sum" || true
-                fetch -H "Authorization: $TOKEN" -o "$DIR/${GE_VER}.tar.gz" \
-                  "$DLURL/file/${B2_BUCKET:-}/proton-ge/${GE_VER}.tar.gz" || true
-              }
-            fi
-            if [ -s "$DIR/${GE_VER}.tar.gz" ] && ( cd "$DIR" && sha512sum -c "${GE_VER}.sha512sum" ); then
-              echo "GE-Proton staged OK (will be cached for future runs)."
-              echo "downloaded=ok" >> "$GITHUB_OUTPUT"
-            else
-              # Leave nothing behind so a failed run can never poison the
-              # -ok cache key (we only save under that key on success anyway).
-              rm -f "$DIR/${GE_VER}.tar.gz" "$DIR/${GE_VER}.sha512sum"
-              echo "::warning::Could not stage GE-Proton (GitHub + B2 refused). build.sh will retry with full diagnostics."
-            fi
-          fi
-
-      - name: Save GE-Proton cache
-        if: steps.fetch.outputs.downloaded == 'ok'
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/GE-Proton
-          key: ge-proton-v1-GE-Proton11-3-ok
+          set -euo pipefail
+          mkdir -p /tmp/GE-Proton
+          cat "${GITHUB_WORKSPACE}/ge-proton-mirror/chunks/GE-Proton11-3.tar.gz.part-"* \
+            > /tmp/GE-Proton/GE-Proton11-3.tar.gz
+          cp "${GITHUB_WORKSPACE}/ge-proton-mirror/GE-Proton11-3.sha512sum" \
+            /tmp/GE-Proton/GE-Proton11-3.sha512sum
+          ( cd /tmp/GE-Proton && sha512sum -c GE-Proton11-3.sha512sum )
+          ls -lh /tmp/GE-Proton/
 
       - name: Copy GE-Proton into chroot
         run: |
