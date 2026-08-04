@@ -238,24 +238,50 @@ jobs:
           bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
           print(f"bucket {BUCKET} id {bucket_id}")
           
+          # Copy the file to avoid large downloads
+          # For large files, stream them directly to curl to avoid memory issues
+          # We need to copy the file first to read its hash, then stream it for upload
           file_name = os.path.basename(ISO)
-          sha1 = hashlib.sha1(open(ISO, "rb").read()).hexdigest()
+
+          # Get upload URL
+          up = curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_get_upload_url",
+              "--data-binary", json.dumps({"bucketId": bucket_id})])
+          up_token = (up.get("uploadAuthorizationToken") or up.get("authorizationToken"))
+          if not up_token:
+              raise SystemExit("no token in get_upload_url response: " + json.dumps(up)[:400])
+
+          # Stream file upload to avoid memory issues
+          import tempfile, hashlib
+          sha1 = hashlib.sha1()
           
-          def upload():
-              up = curl_json(["-H", f"Authorization: {token}",
-                  f"{api_url}/b2api/v3/b2_get_upload_url",
-                  "--data-binary", json.dumps({"bucketId": bucket_id})])
-              up_token = (up.get("uploadAuthorizationToken") or up.get("authorizationToken"))
-              if not up_token:
-                  raise SystemExit("no token in get_upload_url response: " + json.dumps(up)[:400])
-              return curl_json(["-H", f"Authorization: {up_token}",
-                  "-H", f"X-Bz-File-Name: {file_name}",
-                  "-H", f"X-Bz-Content-Sha1: {sha1}",
-                  "-H", "Content-Type: application/octet-stream",
-                  "--data-binary", "@-", up["uploadUrl"]],
-                  body=open(ISO, "rb").read())
+          # Compute hash and write to temp file
+          with open(ISO, "rb") as src, tempfile.NamedTemporaryFile(delete=False) as tmp:
+              for chunk in iter(lambda: src.read(8192), b''):
+                  sha1.update(chunk)
+                  tmp.write(chunk)
+              tmp_path = tmp.name
+
+          # Upload with hash and content in a single pass
+          cmd = ["curl", "-sS", "-w", "\n%{http_code}",
+                 "-H", f"Authorization: {up_token}",
+                 "-H", f"X-Bz-File-Name: {file_name}",
+                 "-H", f"X-Bz-Content-Sha1: {sha1.hexdigest()}",
+                 "-H", "Content-Type: application/octet-stream",
+                 "--data-binary", "@/dev/stdin",
+                 f"{up['uploadUrl']}"]
           
-          result = retry(upload)
+          p = subprocess.run(cmd, stdin=open(tmp_path, "rb"), capture_output=True)
+          import os
+          os.unlink(tmp_path)
+          
+          out = p.stdout.decode(errors="replace")
+          code = out.rsplit("\n", 1)[-1].strip() if out else ""
+          if p.returncode != 0 or not code.startswith("2"):
+              print("upload failed:", p.stderr.decode(errors="replace"), "http", code, file=sys.stderr)
+              raise subprocess.CalledProcessError(p.returncode if p.returncode else int(code), cmd, (p.stderr + p.stdout)[:800])
+          
+          result = json.loads(out.rsplit("\n", 1)[0])
           print(f"uploaded {file_name} ({result.get('contentLength')} bytes) fileId {result['fileId']}")
           
           listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
