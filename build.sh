@@ -941,8 +941,11 @@ configure_proton() {
             fi
         fi
         [ "${SRC}" != "" ] || { echo "GE-Proton download/checksum FAILED (GitHub + B2)"; exit 1; }
-        cd "${SRC}"
-        tar -xzf "${GE_VER}.tar.gz"
+        # Extract into the builder-owned TMPD, not into SRC: the staged
+        # /tmp/GE-Proton (or a download dir) may be root-owned in CI (copied in
+        # via sudo), and tar cannot mkdir there as the builder user.
+        cd "${TMPD}"
+        tar -xzf "${SRC}/${GE_VER}.tar.gz"
         rm -rf '${ROOTFS}'/opt/GE-Proton
         mv "${GE_VER}" '${ROOTFS}'/opt/GE-Proton
         rm -rf "${TMPD}"
