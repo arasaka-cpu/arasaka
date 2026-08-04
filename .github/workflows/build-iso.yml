@@ -168,6 +168,11 @@ jobs:
           sudo chown "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}"/arasaka-*.iso
           ls -lh "${GITHUB_WORKSPACE}"/arasaka-*.iso
 
+      # rclone's copy() does a HEAD check via the B2 *download* host, which
+      # intermittently 403s from runner egress IPs (Unknown 403) and aborts the
+      # upload before it starts. The native B2 API (authorize -> get_upload_url
+      # -> upload) uses the api + upload hosts only, never the download host,
+      # so it is not subject to that block.
       - name: Upload ISO to Backblaze B2
         env:
           B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
@@ -179,21 +184,74 @@ jobs:
             echo "::error::B2 secrets not configured. Add B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET."
             exit 1
           fi
-          sudo apt-get install -y -q rclone
-          rclone config create arasaka-b2 b2 \
-            account "$B2_APPLICATION_KEY_ID" \
-            key "$B2_APPLICATION_KEY" \
-            hard_delete true
           NEW=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso | head -1)
-          echo "Uploading ${NEW} to b2://${B2_BUCKET}/..."
-          rclone copy "$NEW" "arasaka-b2:${B2_BUCKET}/" --progress
-          # Free-tier storage is 10 GB; keep only the 2 newest ISOs.
-          rclone lsf "arasaka-b2:${B2_BUCKET}/" --include '*.iso' --files-only | \
-            grep '^arasaka-' | sort -r | tail -n +3 | while read -r OLD; do
-              echo "Removing old ISO: ${OLD}"
-              rclone delete "arasaka-b2:${B2_BUCKET}/${OLD}"
-            done
-          echo "::notice::ISO uploaded to Backblaze B2 bucket ${B2_BUCKET}"
+          echo "Uploading ${NEW} to B2 bucket ${B2_BUCKET} via native API"
+          python3 - "$NEW" <<'PY'
+          import hashlib, json, os, subprocess, sys, time
+          
+          ISO = sys.argv[1]
+          KEY_ID = os.environ["B2_APPLICATION_KEY_ID"]
+          KEY = os.environ["B2_APPLICATION_KEY"]
+          BUCKET = os.environ["B2_BUCKET"]
+          
+          def curl_json(args, data=None, body=None):
+              cmd = ["curl", "-fsS"] + args
+              if data is not None:
+                  cmd += ["--data-binary", data]
+              r = subprocess.run(cmd, input=body, capture_output=True)
+              if r.returncode != 0:
+                  raise subprocess.CalledProcessError(r.returncode, r.args, r.stderr[:500])
+              return json.loads(r.stdout.decode())
+          
+          def retry(fn, n=4, delay=5):
+              for i in range(n):
+                  try:
+                      return fn()
+                  except (subprocess.CalledProcessError, json.JSONDecodeError):
+                      if i == n - 1:
+                          raise
+                      time.sleep(delay)
+          
+          auth = retry(lambda: curl_json(["-u", f"{KEY_ID}:{KEY}",
+              "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"]))
+          token = auth["authorizationToken"]
+          api_url = auth["apiUrl"]
+          print(f"authorized: api={api_url}")
+          
+          buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_list_buckets", "--data-binary", "{}"]))
+          bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
+          print(f"bucket {BUCKET} id {bucket_id}")
+          
+          file_name = os.path.basename(ISO)
+          sha1 = hashlib.sha1(open(ISO, "rb").read()).hexdigest()
+          
+          def upload():
+              up = curl_json(["-H", f"Authorization: {token}",
+                  f"{api_url}/b2api/v3/b2_get_upload_url",
+                  "--data-binary", json.dumps({"bucketId": bucket_id})])
+              return curl_json(["-H", f"Authorization: {up['uploadAuthorizationToken']}",
+                  "-H", f"X-Bz-File-Name: {file_name}",
+                  "-H", f"X-Bz-Content-Sha1: {sha1}",
+                  "-H", "Content-Type: application/octet-stream",
+                  "--data-binary", "@-", up["uploadUrl"]],
+                  body=open(ISO, "rb").read())
+          
+          result = retry(upload)
+          print(f"uploaded {file_name} ({result.get('contentLength')} bytes) fileId {result['fileId']}")
+          
+          listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_list_file_names",
+              "--data-binary", json.dumps({"bucketId": bucket_id, "prefix": "arasaka-",
+                                           "maxFileCount": 1000})]))
+          files = sorted(listing["files"], key=lambda f: f.get("uploadTimestamp", 0), reverse=True)
+          for f in files[2:]:
+              print(f"removing old ISO {f['fileName']}")
+              curl_json(["-H", f"Authorization: {token}",
+                  f"{api_url}/b2api/v3/b2_delete_file_version",
+                  "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})])
+          print(f"::notice::ISO uploaded to Backblaze B2 bucket {B2_BUCKET}")
+          PY
 
       - name: Generate shareable download link
         if: always()
