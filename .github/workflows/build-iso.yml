@@ -254,29 +254,47 @@ jobs:
               for chunk in iter(lambda: src.read(1 << 20), b""):
                   sha1.update(chunk)
 
+          # Replace any existing file with the same name: a failed earlier
+          # attempt may have already uploaded it, and b2_upload_file refuses
+          # duplicate names.
+          existing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_list_file_names",
+              "--data-binary", json.dumps({"bucketId": bucket_id,
+                                           "fileName": file_name})]))
+          for f in existing.get("files", []):
+              print(f"replacing existing {f['fileName']} ({f['fileId']})")
+              curl_json(["-H", f"Authorization: {token}",
+                  f"{api_url}/b2api/v3/b2_delete_file_version",
+                  "--data-binary", json.dumps({"fileName": f["fileName"],
+                                               "fileId": f["fileId"]})])
+
           # Upload with http.client, which streams the file body in 8 KiB
           # blocks instead of buffering it (curl --data-binary spools the whole
           # ISO to memory and OOMs on the 5 GB file).
           import http.client, urllib.parse
           u = urllib.parse.urlsplit(up["uploadUrl"])
-          conn = http.client.HTTPSConnection(u.hostname, timeout=3600)
-          headers = {
-              "Authorization": up_token,
-              "X-Bz-File-Name": urllib.parse.quote(file_name, safe=""),
-              "X-Bz-Content-Sha1": sha1.hexdigest(),
-              "Content-Type": "application/octet-stream",
-              "Content-Length": str(os.path.getsize(ISO)),
-          }
-          with open(ISO, "rb") as src:
-              conn.request("POST", u.path, body=src, headers=headers)
-          resp = conn.getresponse()
-          body = resp.read()
-          conn.close()
-          if resp.status != 200:
-              print(f"upload failed: HTTP {resp.status}: "
-                    + body.decode(errors="replace")[:600], file=sys.stderr)
-              raise SystemExit(1)
-          result = json.loads(body)
+
+          def do_upload():
+              conn = http.client.HTTPSConnection(u.hostname, timeout=3600)
+              headers = {
+                  "Authorization": up_token,
+                  "X-Bz-File-Name": urllib.parse.quote(file_name, safe=""),
+                  "X-Bz-Content-Sha1": sha1.hexdigest(),
+                  "Content-Type": "application/octet-stream",
+                  "Content-Length": str(os.path.getsize(ISO)),
+              }
+              with open(ISO, "rb") as src:
+                  conn.request("POST", u.path, body=src, headers=headers)
+              resp = conn.getresponse()
+              body = resp.read()
+              conn.close()
+              if resp.status != 200:
+                  raise subprocess.CalledProcessError(
+                      resp.status, "b2_upload_file",
+                      body.decode(errors="replace")[:600])
+              return json.loads(body)
+
+          result = retry(do_upload)
           print(f"uploaded {file_name} ({result.get('contentLength')} bytes) fileId {result['fileId']}")
           
           listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
