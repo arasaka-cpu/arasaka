@@ -215,7 +215,12 @@ jobs:
           auth = retry(lambda: curl_json(["-u", f"{KEY_ID}:{KEY}",
               "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"]))
           token = auth["authorizationToken"]
-          api_url = auth["apiUrl"]
+          auth_info = auth.get("apiInfo") or {}
+          api_url = (auth.get("apiUrl") or auth_info.get("apiUrl")
+              or (auth_info.get("storageApi") or {}).get("apiUrl"))
+          if not api_url:
+              raise SystemExit("cannot find apiUrl in authorize response: "
+                               + json.dumps(auth)[:400])
           print(f"authorized: api={api_url}")
           
           buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
@@ -230,7 +235,10 @@ jobs:
               up = curl_json(["-H", f"Authorization: {token}",
                   f"{api_url}/b2api/v3/b2_get_upload_url",
                   "--data-binary", json.dumps({"bucketId": bucket_id})])
-              return curl_json(["-H", f"Authorization: {up['uploadAuthorizationToken']}",
+              up_token = (up.get("uploadAuthorizationToken") or up.get("authorizationToken"))
+              if not up_token:
+                  raise SystemExit("no token in get_upload_url response: " + json.dumps(up)[:400])
+              return curl_json(["-H", f"Authorization: {up_token}",
                   "-H", f"X-Bz-File-Name: {file_name}",
                   "-H", f"X-Bz-Content-Sha1: {sha1}",
                   "-H", "Content-Type: application/octet-stream",
