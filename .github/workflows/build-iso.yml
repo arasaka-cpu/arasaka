@@ -195,14 +195,19 @@ jobs:
           BUCKET = os.environ["B2_BUCKET"]
           
           def curl_json(args, data=None, body=None):
-              cmd = ["curl", "-fsS", "--fail-with-body"] + args
+              cmd = ["curl", "-sS"] + args + ["-w", "\n%{http_code}"]
               if data is not None:
                   cmd += ["--data-binary", data]
               r = subprocess.run(cmd, input=body, capture_output=True)
-              if r.returncode != 0:
-                  msg = (r.stdout + r.stderr).decode(errors="replace")[:800]
-                  raise subprocess.CalledProcessError(r.returncode, r.args, msg)
-              return json.loads(r.stdout.decode())
+              out = r.stdout.decode(errors="replace")
+              code = out.rsplit("\n", 1)[-1].strip() if out else ""
+              if r.returncode != 0 or not code.startswith("2"):
+                  print("curl request failed:", r.stderr.decode(errors="replace"),
+                        "http", code, "body:", out[:600], file=sys.stderr)
+                  raise subprocess.CalledProcessError(
+                      r.returncode if r.returncode else int(code), r.args,
+                      (r.stderr + r.stdout)[:800])
+              return json.loads(out.rsplit("\n", 1)[0])
           
           def retry(fn, n=4, delay=5):
               for i in range(n):
