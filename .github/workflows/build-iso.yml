@@ -260,7 +260,7 @@ jobs:
           existing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
               f"{api_url}/b2api/v3/b2_list_file_names",
               "--data-binary", json.dumps({"bucketId": bucket_id,
-                                           "fileName": file_name})]))
+                                           "prefix": file_name})]))
           for f in existing.get("files", []):
               print(f"replacing existing {f['fileName']} ({f['fileId']})")
               curl_json(["-H", f"Authorization: {token}",
