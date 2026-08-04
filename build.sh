@@ -872,10 +872,11 @@ configure_proton() {
     # never relies on host-side ${...} expansion mid-string (a quote-break bug
     # here expanded ${TMPD} on the host to "", writing the tarball to / and
     # making sha512sum -c look for the sidecar in the wrong dir -> FAILED).
-    # Runs WITHOUT sudo (no run): this block only writes to the builder-owned
-    # rootfs, and dropping sudo means curl's stderr is not swallowed by run()'s
-    # 2>/dev/null - a failed download shows the real reason in the log.
-    bash -c '
+    # Runs via run() (root): the extract+mv writes into the ROOT-OWNED
+    # ${ROOTFS}/opt, which the builder user cannot do. The download itself
+    # never happens in practice (CI pre-stages the verified mirror copy), so
+    # losing curl's stderr to run()'s 2>/dev/null is an acceptable trade-off.
+    run bash -c '
         set -e
         GE_VER="$1"
         GE_URL="$2"
