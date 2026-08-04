@@ -195,12 +195,13 @@ jobs:
           BUCKET = os.environ["B2_BUCKET"]
           
           def curl_json(args, data=None, body=None):
-              cmd = ["curl", "-fsS"] + args
+              cmd = ["curl", "-fsS", "--fail-with-body"] + args
               if data is not None:
                   cmd += ["--data-binary", data]
               r = subprocess.run(cmd, input=body, capture_output=True)
               if r.returncode != 0:
-                  raise subprocess.CalledProcessError(r.returncode, r.args, r.stderr[:500])
+                  msg = (r.stdout + r.stderr).decode(errors="replace")[:800]
+                  raise subprocess.CalledProcessError(r.returncode, r.args, msg)
               return json.loads(r.stdout.decode())
           
           def retry(fn, n=4, delay=5):
@@ -223,8 +224,12 @@ jobs:
                                + json.dumps(auth)[:400])
           print(f"authorized: api={api_url}")
           
+          # Bucket-restricted app keys get 401 from list_buckets unless the
+          # request names the bucket (see b2_list_buckets docs).
           buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_list_buckets", "--data-binary", "{}"]))
+              f"{api_url}/b2api/v3/b2_list_buckets",
+              "--data-binary", json.dumps({"accountId": auth.get("accountId", ""),
+                                           "bucketName": BUCKET})]))
           bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
           print(f"bucket {BUCKET} id {bucket_id}")
           
