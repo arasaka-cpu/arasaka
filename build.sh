@@ -883,54 +883,65 @@ configure_proton() {
         B2_APPLICATION_KEY="$4"
         B2_BUCKET="$5"
         TMPD=$(mktemp -d)
-        # GitHub release CDN intermittently 403s and --retry alone does NOT
-        # retry HTTP errors, so loop: download -> verify -> extract, nuking
-        # partials between attempts. A corrupt download is caught by the
-        # checksum and triggers a fresh attempt.
-        FOUND=0
-        for attempt in 1 2 3; do
-            echo "Downloading ${GE_VER} (~700 MB)... attempt ${attempt}/3"
-            rm -f "${TMPD}/${GE_VER}.tar.gz" "${TMPD}/${GE_VER}.sha512sum"
-            if curl -fL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
-                    -o "${TMPD}/${GE_VER}.tar.gz" "${GE_URL}" \
-                && curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
-                    -o "${TMPD}/${GE_VER}.sha512sum" "${GE_URL}.sha512sum" \
-                && ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ); then
-                FOUND=1
-                break
-            fi
-        done
-        # GitHub release CDN intermittently blocks runner IPs (HTTP 403/429 on
-        # release-assets.githubusercontent.com). If B2 creds are provided (CI),
-        # fall back to the Backblaze B2 mirror of the same artifact.
-        if [ "${FOUND}" != 1 ] && [ -n "${B2_APPLICATION_KEY_ID:-}" ] \
-            && [ -n "${B2_APPLICATION_KEY:-}" ] && [ -n "${B2_BUCKET:-}" ]; then
-            echo "GitHub CDN unreachable - falling back to Backblaze B2 mirror..."
+        SRC=""
+        # CI pre-stages a verified copy at /tmp/GE-Proton (GitHub Actions cache,
+        # see build-iso.yml) so the build never depends on flaky external CDNs.
+        # The runner egress IP is intermittently blocked by the GitHub release
+        # CDN AND the B2 download endpoint, so the cache is the reliable path.
+        if [ -s "/tmp/GE-Proton/${GE_VER}.tar.gz" ] \
+            && [ -s "/tmp/GE-Proton/${GE_VER}.sha512sum" ] \
+            && ( cd /tmp/GE-Proton && sha512sum -c "${GE_VER}.sha512sum" ); then
+            echo "Using pre-staged GE-Proton from /tmp/GE-Proton"
+            SRC=/tmp/GE-Proton
+        else
+            echo "No usable staged GE-Proton - downloading..."
+            # GitHub release CDN intermittently 403s/404s and --retry alone does
+            # NOT retry HTTP errors, so loop: download -> verify, nuking
+            # partials between attempts. A corrupt download is caught by the
+            # checksum and triggers a fresh attempt.
             for attempt in 1 2 3; do
+                echo "Downloading ${GE_VER} (~700 MB)... attempt ${attempt}/3"
                 rm -f "${TMPD}/${GE_VER}.tar.gz" "${TMPD}/${GE_VER}.sha512sum"
-                AUTH=$(curl -fsS -u "${B2_APPLICATION_KEY_ID}:${B2_APPLICATION_KEY}" \
-                    "https://api.backblazeb2.com/b2api/v3/b2_authorize_account" 2>&1) \
-                    || { echo "  B2 authorize failed"; continue; }
-                B2_TOKEN=$(echo "${AUTH}" | sed -n "s/.*\"authorizationToken\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
-                B2_DLURL=$(echo "${AUTH}" | sed -n "s/.*\"downloadUrl\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
-                echo "  B2 authorized: token ${#B2_TOKEN} chars, dlurl ${B2_DLURL}"
-                [ -n "${B2_TOKEN}" ] && [ -n "${B2_DLURL}" ] || continue
-                if curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
-                        -H "Authorization: ${B2_TOKEN}" \
-                        -o "${TMPD}/${GE_VER}.sha512sum" \
-                        "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.sha512sum" \
+                if curl -fL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
+                        -o "${TMPD}/${GE_VER}.tar.gz" "${GE_URL}" \
                     && curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
-                        -H "Authorization: ${B2_TOKEN}" \
-                        -o "${TMPD}/${GE_VER}.tar.gz" \
-                        "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.tar.gz" \
+                        -o "${TMPD}/${GE_VER}.sha512sum" "${GE_URL}.sha512sum" \
                     && ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ); then
-                    FOUND=1
+                    SRC="${TMPD}"
                     break
                 fi
             done
+            # GitHub release CDN intermittently blocks runner IPs. If B2 creds
+            # are provided (CI), fall back to the Backblaze B2 mirror.
+            if [ "${SRC}" = "" ] && [ -n "${B2_APPLICATION_KEY_ID:-}" ] \
+                && [ -n "${B2_APPLICATION_KEY:-}" ] && [ -n "${B2_BUCKET:-}" ]; then
+                echo "GitHub CDN unreachable - falling back to Backblaze B2 mirror..."
+                for attempt in 1 2 3; do
+                    rm -f "${TMPD}/${GE_VER}.tar.gz" "${TMPD}/${GE_VER}.sha512sum"
+                    AUTH=$(curl -fsS -u "${B2_APPLICATION_KEY_ID}:${B2_APPLICATION_KEY}" \
+                        "https://api.backblazeb2.com/b2api/v3/b2_authorize_account" 2>&1) \
+                        || { echo "  B2 authorize failed"; continue; }
+                    B2_TOKEN=$(echo "${AUTH}" | sed -n "s/.*\"authorizationToken\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+                    B2_DLURL=$(echo "${AUTH}" | sed -n "s/.*\"downloadUrl\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+                    echo "  B2 authorized: token ${#B2_TOKEN} chars, dlurl ${B2_DLURL}, bucket ${B2_BUCKET}"
+                    [ -n "${B2_TOKEN}" ] && [ -n "${B2_DLURL}" ] || continue
+                    if curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
+                            -H "Authorization: ${B2_TOKEN}" \
+                            -o "${TMPD}/${GE_VER}.sha512sum" \
+                            "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.sha512sum" \
+                        && curl -fsSL --retry-all-errors --retry 5 --retry-delay 3 2>&1 \
+                            -H "Authorization: ${B2_TOKEN}" \
+                            -o "${TMPD}/${GE_VER}.tar.gz" \
+                            "${B2_DLURL}/file/${B2_BUCKET}/proton-ge/${GE_VER}.tar.gz" \
+                        && ( cd "${TMPD}" && sha512sum -c "${GE_VER}.sha512sum" ); then
+                        SRC="${TMPD}"
+                        break
+                    fi
+                done
+            fi
         fi
-        [ "${FOUND}" = 1 ] || { echo "GE-Proton download/checksum FAILED (GitHub + B2)"; exit 1; }
-        cd "${TMPD}"
+        [ "${SRC}" != "" ] || { echo "GE-Proton download/checksum FAILED (GitHub + B2)"; exit 1; }
+        cd "${SRC}"
         tar -xzf "${GE_VER}.tar.gz"
         rm -rf '${ROOTFS}'/opt/GE-Proton
         mv "${GE_VER}" '${ROOTFS}'/opt/GE-Proton

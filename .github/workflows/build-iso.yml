@@ -107,6 +107,67 @@ jobs:
           sudo chroot "${CH}" chown -R builder:builder "${REPO_DIR}"
           echo "repo copied to ${CH}/${REPO_DIR}"
 
+      # GE-Proton (~508 MB) is hosted on the GitHub release CDN and mirrored on
+      # B2. Both intermittently refuse the runner egress IP (404/403), so we
+      # stage it once into the Actions cache (GitHub's own service, always
+      # reachable) and serve it to every build from there.
+      - name: Cache GE-Proton tarball
+        uses: actions/cache@v4
+        with:
+          path: /tmp/GE-Proton
+          key: ge-proton-v1-GE-Proton11-3
+
+      - name: Fetch GE-Proton if not cached (best effort)
+        env:
+          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+        run: |
+          set -uo pipefail
+          GE_VER=GE-Proton11-3
+          GE_URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${GE_VER}/${GE_VER}.tar.gz"
+          DIR=/tmp/GE-Proton
+          mkdir -p "$DIR"
+          if [ -s "$DIR/${GE_VER}.tar.gz" ] && ( cd "$DIR" && sha512sum -c "${GE_VER}.sha512sum" ); then
+            echo "GE-Proton present in cache"
+          else
+            echo "Cache miss - downloading GE-Proton (best effort; build.sh retries with full diagnostics if this fails)..."
+            fetch() { curl -fL --retry-all-errors --retry 5 --retry-delay 3 "$@"; }
+            if fetch -o "$DIR/${GE_VER}.tar.gz" "$GE_URL" \
+                && fetch -o "$DIR/${GE_VER}.sha512sum" "${GE_URL}.sha512sum"; then
+              echo "Downloaded from GitHub."
+            else
+              echo "GitHub download failed - trying Backblaze B2 mirror (bucket: ${B2_BUCKET:-unset})..."
+              rm -f "$DIR/${GE_VER}.tar.gz" "$DIR/${GE_VER}.sha512sum"
+              AUTH=$(curl -fsS -u "${B2_APPLICATION_KEY_ID:-}:${B2_APPLICATION_KEY:-}" \
+                "https://api.backblazeb2.com/b2api/v3/b2_authorize_account" 2>&1) || AUTH=""
+              TOKEN=$(echo "$AUTH" | sed -n 's/.*"authorizationToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+              DLURL=$(echo "$AUTH" | sed -n 's/.*"downloadUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+              [ -n "$TOKEN" ] && [ -n "$DLURL" ] && {
+                fetch -H "Authorization: $TOKEN" -o "$DIR/${GE_VER}.sha512sum" \
+                  "$DLURL/file/${B2_BUCKET:-}/proton-ge/${GE_VER}.sha512sum" || true
+                fetch -H "Authorization: $TOKEN" -o "$DIR/${GE_VER}.tar.gz" \
+                  "$DLURL/file/${B2_BUCKET:-}/proton-ge/${GE_VER}.tar.gz" || true
+              }
+            fi
+            if [ -s "$DIR/${GE_VER}.tar.gz" ] && ( cd "$DIR" && sha512sum -c "${GE_VER}.sha512sum" ); then
+              echo "GE-Proton staged OK (will be cached for future runs)."
+            else
+              echo "::warning::Could not stage GE-Proton (GitHub + B2 refused). build.sh will retry with full diagnostics."
+            fi
+          fi
+
+      - name: Copy GE-Proton into chroot
+        run: |
+          set -euo pipefail
+          if [ -s /tmp/GE-Proton/GE-Proton11-3.tar.gz ]; then
+            sudo mkdir -p "${CHROOT_DIR}/tmp/GE-Proton"
+            sudo cp /tmp/GE-Proton/GE-Proton11-3* "${CHROOT_DIR}/tmp/GE-Proton/"
+            echo "GE-Proton copied into chroot at /tmp/GE-Proton"
+          else
+            echo "No staged GE-Proton - build.sh will download."
+          fi
+
       - name: Build rootfs (build.sh)
         env:
           B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
