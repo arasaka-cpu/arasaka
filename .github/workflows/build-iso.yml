@@ -167,9 +167,10 @@ jobs:
             'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" ./create-iso.sh'
 
       # Build the signed OTA bundle (build-bundle.sh) from the rootfs produced
-      # by build.sh: ext4 slot image + regenerated initramfs, wrapped in a
-      # verity RAUC bundle signed with the OTA signing key and verified against
-      # the staged CA. The signing key/cert are passed via secrets.
+      # by build.sh: squashfs + dm-verity slot image + regenerated initramfs,
+      # wrapped in a verity RAUC bundle signed with the OTA signing key and
+      # verified against the staged CA. The signing key/cert are passed via
+      # secrets.
       - name: Build OTA bundle (build-bundle.sh)
         env:
           OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}

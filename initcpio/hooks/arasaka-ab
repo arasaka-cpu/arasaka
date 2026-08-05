@@ -15,8 +15,12 @@
 #     /boot/ab/verity-<slot>.conf (written by the bundle's post-install hook).
 #     dm-verity verifies every block the kernel reads, so a tampered or
 #     corrupt slot fails to open/mount and the rollback path takes over.
-#   - On a fresh install (no verity conf yet) the slot is a plain ext4
-#     partition and is mounted directly read-only.
+#   - On a fresh install the slot partitions are already raw squashfs +
+#     dm-verity images (written by the installer with the same
+#     make-verity-slot.sh the OTA bundle uses), so the verity path above is
+#     used from the very first boot. The ext4 path below remains only for
+#     legacy / hand-copied images (and the Calamares rollback slot before its
+#     first OTA) that have no verity conf yet.
 #
 # Immutability: the slot root is mounted ro and stays ro for the whole boot.
 # The ONLY writable state on the running system lives on the btrfs data
@@ -77,8 +81,8 @@ find_data_partition() {
 read_verity_conf() {
     # $1 = slot letter. Prints "ROOT_HASH HASH_OFFSET" for the slot's verity
     # image, or fails if the conf is missing/malformed. The conf is written to
-    # /boot by the OTA bundle's post-install hook; on a fresh install (ext4
-    # slot) it does not exist and the ext4 path is used instead.
+    # /boot by the OTA bundle's post-install hook and by the installers on a
+    # fresh install; on a legacy image without one the ext4 path is used.
     local slot="$1" conf roothash hash_off
     conf="${abmnt}/ab/verity-${slot}.conf"
     [ -f "$conf" ] || return 1
@@ -127,9 +131,10 @@ mount_slot_verity() {
 }
 
 mount_slot_ext4() {
-    # $1 = slot letter, $2 = newroot. Fresh-install fallback: the slot is a
-    # plain ext4 partition. The type is forced so a stray squashfs image can
-    # never be mounted unverified through this path.
+    # $1 = slot letter, $2 = newroot. Fallback for slots without a verity conf
+    # (legacy / hand-copied images; the Calamares rollback slot before its
+    # first OTA): the slot is a plain ext4 partition. The type is forced so a
+    # stray squashfs image can never be mounted unverified through this path.
     local slot="$1" newroot="$2" rootdev
     rootdev="$(find_slot_partition "$slot")" || return 1
     [ -b "$rootdev" ] || return 1
@@ -143,7 +148,7 @@ mount_slot_ext4() {
 
 try_mount_slot() {
     # $1 = slot letter, $2 = newroot. A verity conf selects the verified path;
-    # without one the slot is still a fresh-install ext4 root.
+    # without one the slot is a plain ext4 fallback (legacy image).
     if [ -f "${abmnt}/ab/verity-$1.conf" ]; then
         mount_slot_verity "$1" "$2"
     else
