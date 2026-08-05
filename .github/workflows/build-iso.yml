@@ -188,9 +188,8 @@ jobs:
           sudo cp /tmp/ota-signing.key "${CH}/tmp/ota/signing.key"
           sudo cp /tmp/ota-signing.crt "${CH}/tmp/ota/signing.crt"
           rm -f /tmp/ota-signing.key /tmp/ota-signing.crt
-          sudo chroot "${CH}" chown -R builder:builder /tmp/ota
           sudo chroot "${CH}" chmod 600 /tmp/ota/signing.key
-          sudo chroot "${CH}" /usr/bin/su - builder -c \
+          sudo chroot "${CH}" /usr/bin/bash -c \
             'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" \
              OTA_SIGNING_KEY="/tmp/ota/signing.key" \
              OTA_SIGNING_CERT="/tmp/ota/signing.crt" \
