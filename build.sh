@@ -1196,8 +1196,9 @@ configure_debloat() {
 
     # openssh: client + server, not enabled, and a desktop user who needs SSH
     # can install it themselves. Force-remove (-dd) so gcr-4 / gvfs / libnma
-    # stay put (they pull openssh back in on the next pacman transaction, so
-    # arasaka-update.sh strips it again after every update).
+    # stay put (they pull openssh back in on the next pacman transaction). OTA
+    # bundles are rebuilt from this debloated rootfs, so openssh stays absent
+    # on every update.
     run arch-chroot "${ROOTFS}" /bin/bash -c '
         pacman -Rdd --noconfirm openssh 2>&1 || true
         rm -f /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* 2>/dev/null || true

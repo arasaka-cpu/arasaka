@@ -5,10 +5,11 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
 
 ## Highlights
 
-- **Immutable A/B rootfs** — two ext4 slots (`arasaka-slot-a` / `arasaka-slot-b`)
-  on a shared btrfs data partition (`arasaka-data`). Slots are replaced
-  wholesale by updates; all user/system state lives on `/data` and survives
-  OTA slot swaps.
+- **Immutable A/B rootfs** — two raw slots (`arasaka-slot-a` / `arasaka-slot-b`)
+  on a shared btrfs data partition (`arasaka-data`). After the first OTA each
+  slot holds a squashfs image verified block-by-block through dm-verity at
+  every boot. Slots are replaced wholesale by updates; all user/system state
+  lives on `/data` and survives OTA slot swaps.
 - **Signed OTA updates** — RAUC `verity` bundles signed with the OTA key,
   downloaded from a Backblaze B2 updates bucket, verified against a baked-in
   keyring, and installed to the inactive slot. No Arch mirrors at runtime.
@@ -39,10 +40,11 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
         ┌───────────────────────┴────────────────────────┐
         │                                                │
 ┌───────▼────────┐                              ┌────────▼───────┐
-│ rootfs.0 (A)   │  /dev/disk/by-label/         │ rootfs.1 (B)   │
-│ ext4 slot-a    │  arasaka-slot-a              │ ext4 slot-b    │
-│ /boot/vmlinuz- │  root filesystem             │ /boot/vmlinuz- │
-│ arasaka-a      │                              │ arasaka-b      │
+│ rootfs.0 (A)   │  /dev/disk/by-partlabel/     │ rootfs.1 (B)   │
+│ squashfs+      │  arasaka-slot-a              │ squashfs+      │
+│ dm-verity      │  verified root               │ dm-verity      │
+│ (squashfs img  │  (squashfs opened via        │ (squashfs img  │
+│  + hash tree)  │   dm-verity at boot)         │  + hash tree)  │
 └───────┬────────┘                              └────────┬───────┘
         │            ┌────────────────────────┐          │
         └────────────►      arasaka-data      ◄──────────┘
@@ -53,11 +55,14 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
                      └────────────────────────┘
 ```
 
-- **Slots**: two ext4 rootfs slots, selected by `rauc.slot=A|B` on the kernel
-  command line and mounted by the initramfs A/B hook. Slots are treated as
-  immutable: updates replace a whole slot, and no user data lives on them —
-  all persistent state lives on the shared btrfs data partition (`/data`),
-  which survives every update.
+- **Slots**: two raw rootfs slots, selected by `rauc.slot=A|B` on the kernel
+  command line and mounted by the initramfs A/B hook. After the first OTA each
+  slot is a squashfs image whose blocks are verified through dm-verity at boot
+  (root hash + hash offset in `/boot/ab/verity-<slot>.conf`, written by the
+  bundle's post-install hook); a fresh install's ext4 slot is mounted read-only
+  as a fallback. Slots are immutable: updates replace a whole slot, and no user
+  data lives on them — all persistent state lives on the shared btrfs data
+  partition (`/data`), which survives every update.
 - **RAUC**: `config/rauc/system.conf` describes the slots and a custom
   `bootloader=custom` backend (`/usr/lib/rauc/rauc-boot-handler.sh`) that
   performs the systemd-boot slot switching, kernel/initramfs hash recording,
@@ -76,10 +81,13 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
 3. If the advertised version is newer than the installed one, the referenced
    `.raucb` bundle is downloaded and its SHA-256 is checked.
 4. `rauc install` verifies the bundle CMS signature against
-   `/etc/rauc/keyring.pem` and the `compatible=arasaka-x86_64` string, then
-   writes the new rootfs to the inactive slot and makes it primary.
-5. On reboot, systemd-boot boots the new slot; a failed boot marks the slot BAD
-   and the custom backend restores the previous one.
+   `/etc/rauc/keyring.pem` and the `compatible=arasaka-x86_64` string, writes
+   the new squashfs slot image to the inactive slot, and its post-install hook
+   records the root hash in `/boot/ab/verity-<slot>.conf` before the slot is
+   made primary.
+5. On reboot the initramfs opens the slot through dm-verity and verifies every
+   block; a failed or tampered boot rolls back to the previous slot, and the
+   custom backend marks slots good/bad.
 
 ## Repository layout
 
@@ -91,9 +99,9 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
 | `install-to-disk.sh` | Disk installer logic: partitions, A/B slots, loader entries, RAUC state. |
 | `config/rauc/` | RAUC `system.conf`, the device CA (`ca.crt`) and OTA signing cert (`signing.crt`). |
 | `config/calamares/` | Calamares installer branding, modules, and scripts. |
-| `scripts/` | Boot handler, OTA client, boot verification, data persistence, slot mounting, update engine. |
-| `systemd/` | Units + timers for updates, boot verification, slot mounting, mark-good, data persistence. |
-| `initcpio/` | Initramfs A/B hook + mkinitcpio drop-in (busybox-style initramfs). |
+| `scripts/` | Boot handler, OTA update engine, boot verification, data persistence, install hardening. |
+| `systemd/` | Units + timers for updates, boot verification, mark-good, data persistence. |
+| `initcpio/` | Initramfs A/B + dm-verity hooks and the mkinitcpio drop-in (busybox-style initramfs). |
 | `aur/` | Local AUR-style packages: calamares, snapd, system76-power, findutils. |
 | `branding/` | Logo and product artwork. |
 | `.github/workflows/build-iso.yml` | CI: build ISO + OTA bundle, upload to B2. |
