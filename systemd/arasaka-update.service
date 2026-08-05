@@ -1,7 +1,7 @@
 [Unit]
 Description=Arasaka A/B System Update
 Documentation=https://github.com/arasaka
-After=network-online.target systemd-resolved.service
+After=network-online.target systemd-resolved.service rauc.service
 Wants=network-online.target
 ConditionPathExists=!/var/lock/arasaka-update.lock
 
@@ -15,9 +15,10 @@ TimeoutStartSec=3600
 Nice=10
 IOSchedulingClass=idle
 ProtectSystem=strict
-ReadWritePaths=/var/tmp /var/cache /var/log /tmp /run
+ReadWritePaths=/var/tmp /var/cache /var/log /tmp /run /boot /data /mnt/rauc
 PrivateTmp=true
 NoNewPrivileges=false
+RestrictRealtime=false
 
 [Install]
 WantedBy=multi-user.target

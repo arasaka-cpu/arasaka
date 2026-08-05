@@ -138,10 +138,19 @@ install_rootfs() {
     # Initialize data partition subvolumes
     log "Creating data partition subvolumes..."
     sudo btrfs subvolume create "${mnt}/data/@flatpak" 2>/dev/null || true
+    sudo btrfs subvolume create "${mnt}/data/@snap" 2>/dev/null || true
+    sudo btrfs subvolume create "${mnt}/data/@snapd" 2>/dev/null || true
     sudo btrfs subvolume create "${mnt}/data/@systemd" 2>/dev/null || true
     sudo btrfs subvolume create "${mnt}/data/@log" 2>/dev/null || true
     sudo btrfs subvolume create "${mnt}/data/@cache" 2>/dev/null || true
     sudo btrfs subvolume create "${mnt}/data/@home" 2>/dev/null || true
+
+    # RAUC persistent state directory on the data partition (survives slot
+    # swaps). Both slots default to good; primary is slot A.
+    sudo mkdir -p "${mnt}/data/rauc/boot"
+    echo "A" | sudo tee "${mnt}/data/rauc/boot/primary" >/dev/null
+    echo "good" | sudo tee "${mnt}/data/rauc/boot/A.state" >/dev/null
+    echo "good" | sudo tee "${mnt}/data/rauc/boot/B.state" >/dev/null
 
     # Copy rootfs to slot A
     log "Copying rootfs to Slot A..."
@@ -192,29 +201,38 @@ console-mode auto
 editor no
 LEOF
 
-    # Slot A boot entry (dynamic kernel)
+    # Slot A boot entry (per-slot kernel)
     sudo tee "${mnt}/boot/loader/entries/arasaka-a.conf" >/dev/null << AEOF
 title   Arasaka (Slot A)
-linux   /${kname}
-initrd  /${imgname}
-options root=/dev/disk/by-label/arasaka-slot-a rw
+linux   /vmlinuz-arasaka-a
+initrd  /initramfs-arasaka-a.img
+options root=/dev/disk/by-label/arasaka-slot-a rw rauc.slot=A
 AEOF
 
-    # Slot B boot entry (dynamic kernel)
+    # Slot B boot entry (per-slot kernel)
     sudo tee "${mnt}/boot/loader/entries/arasaka-b.conf" >/dev/null << BEOF
 title   Arasaka (Slot B)
-linux   /${kname}
-initrd  /${imgname}
-options root=/dev/disk/by-label/arasaka-slot-b rw
+linux   /vmlinuz-arasaka-b
+initrd  /initramfs-arasaka-b.img
+options root=/dev/disk/by-label/arasaka-slot-b rw rauc.slot=B
 BEOF
 
-    # Copy kernel and initramfs to boot
-    sudo cp "${ROOTFS}/boot/${kname}" "${mnt}/boot/" 2>/dev/null || \
-        sudo cp /boot/${kname} "${mnt}/boot/" 2>/dev/null || \
-        sudo cp /boot/vmlinuz-linux "${mnt}/boot/"
-    sudo cp "${ROOTFS}/boot/${imgname}" "${mnt}/boot/" 2>/dev/null || \
-        sudo cp /boot/${imgname} "${mnt}/boot/" 2>/dev/null || \
-        sudo cp /boot/initramfs-linux.img "${mnt}/boot/"
+    # Copy kernel and initramfs to /boot with per-slot names (slot A active).
+    # The RAUC boot handler re-extracts these from a freshly-written slot on
+    # every set-primary, keeping them in lockstep with the slot content.
+    sudo cp "${ROOTFS}/boot/${kname}" "${mnt}/boot/vmlinuz-arasaka-a" 2>/dev/null || \
+        sudo cp /boot/${kname} "${mnt}/boot/vmlinuz-arasaka-a" 2>/dev/null || \
+        sudo cp /boot/vmlinuz-linux "${mnt}/boot/vmlinuz-arasaka-a"
+    sudo cp "${ROOTFS}/boot/${imgname}" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
+        sudo cp /boot/${imgname} "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
+        sudo cp /boot/initramfs-linux.img "${mnt}/boot/initramfs-arasaka-a.img"
+    sudo cp "${mnt}/boot/vmlinuz-arasaka-a" "${mnt}/boot/vmlinuz-arasaka-b" 2>/dev/null || true
+    sudo cp "${mnt}/boot/initramfs-arasaka-a.img" "${mnt}/boot/initramfs-arasaka-b.img" 2>/dev/null || true
+
+    # Record the kernel/initramfs baseline for slot A (RAUC state dir lives on
+    # the data partition; arasaka-verify-boot compares these at boot).
+    sha256sum "${mnt}/boot/vmlinuz-arasaka-a" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.kernel.sha256" >/dev/null
+    sha256sum "${mnt}/boot/initramfs-arasaka-a.img" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.initrd.sha256" >/dev/null
 
     # Set initial active slot
     echo "a" | sudo tee "${mnt}/boot/ab/active-slot" >/dev/null
@@ -226,7 +244,7 @@ BEOF
     sudo tee "${mnt}/slot-a/etc/fstab" >/dev/null << FSTABEOF
 # Arasaka fstab - systemd manages mounts
 /dev/disk/by-label/arasaka-boot    /boot           ext4    defaults,noatime 0 2
-/dev/disk/by-label/arasaka-data    /               btrfs   defaults,noatime,compress=zstd 0 1
+/dev/disk/by-label/arasaka-data    /data           btrfs   defaults,noatime,compress=zstd,subvol=/ 0 1
 /dev/disk/by-label/EFI              /boot/efi       vfat    defaults,noatime 0 2
 FSTABEOF
 

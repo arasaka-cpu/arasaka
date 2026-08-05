@@ -246,6 +246,24 @@ main() {
     log "Arasaka Update Engine"
     log "=========================================="
 
+    # Update mode: "ota" (default, signed RAUC bundles from the B2 updates
+    # bucket) or "mirror" (legacy in-place chroot + slot write from Arch
+    # mirrors). OTA is the primary channel; mirror remains as a manual
+    # fallback when no OTA config/keys are present.
+    local mode="${MODE:-ota}"
+    if [ "$mode" = "ota" ]; then
+        if [ -x /usr/local/bin/arasaka-ota-update.sh ] \
+           && [ -f /etc/arasaka/ota.conf ] \
+           && command -v rauc >/dev/null 2>&1; then
+            exec /usr/local/bin/arasaka-ota-update.sh
+        fi
+        log "OTA mode requested but rauc/OTA config unavailable - falling back to mirror mode"
+        mode="mirror"
+    fi
+    if [ "$mode" != "mirror" ]; then
+        die "Unknown update mode '${mode}' (expected ota|mirror)"
+    fi
+
     if [ -f /var/lock/arasaka-update.lock ]; then
         local old_pid
         old_pid=$(cat /var/lock/arasaka-update.lock 2>/dev/null || echo "")

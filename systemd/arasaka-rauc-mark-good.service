@@ -1,0 +1,12 @@
+[Unit]
+Description=Arasaka RAUC mark slot good (confirm successful boot)
+After=display-manager.service systemd-user-sessions.service arasaka-verify-boot.service rauc.service
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rauc status mark-good
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

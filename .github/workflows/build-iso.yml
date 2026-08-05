@@ -6,9 +6,13 @@
 #   2. bootstraps an Arch Linux chroot into it,
 #   3. runs build.sh + create-iso.sh inside the chroot as an unprivileged
 #      builder user (passwordless sudo),
-#   4. uploads the resulting .iso to B2, keeping only the newest ones.
+#   4. uploads the resulting .iso to B2, keeping only the newest ones,
+#   5. builds the signed RAUC OTA bundle and uploads it (with the signed
+#      update pointer) to the updates bucket.
 #
 # Required repo secrets: B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET
+#                        B2_UPDATES_APPLICATION_KEY_ID, B2_UPDATES_APPLICATION_KEY, B2_UPDATES_BUCKET
+#                        OTA_SIGNING_KEY, OTA_SIGNING_CERT
 
 name: Build Arasaka ISO
 
@@ -90,7 +94,8 @@ jobs:
             pacman -S --noconfirm --needed \
               base arch-install-scripts sudo base-devel git rsync curl \
               squashfs-tools dosfstools mtools xorriso parted efibootmgr \
-              e2fsprogs btrfs-progs
+              e2fsprogs btrfs-progs python openssl \
+              rauc desync
             useradd -m -s /bin/bash builder
             echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
             chmod 440 /etc/sudoers.d/builder
@@ -161,12 +166,94 @@ jobs:
           sudo chroot "${CHROOT_DIR}" /usr/bin/su - builder -c \
             'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" ./create-iso.sh'
 
+      # Build the signed OTA bundle (build-bundle.sh) from the rootfs produced
+      # by build.sh: ext4 slot image + regenerated initramfs, wrapped in a
+      # verity RAUC bundle signed with the OTA signing key and verified against
+      # the staged CA. The signing key/cert are passed via secrets.
+      - name: Build OTA bundle (build-bundle.sh)
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+          OTA_SIGNING_CERT: ${{ secrets.OTA_SIGNING_CERT }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OTA_SIGNING_KEY" ] || [ -z "$OTA_SIGNING_CERT" ]; then
+            echo "::warning::OTA_SIGNING_KEY / OTA_SIGNING_CERT secrets not set; skipping OTA bundle"
+            exit 0
+          fi
+          CH="${CHROOT_DIR}"
+          # Secrets are written to files inside the chroot (never to the repo).
+          echo "$OTA_SIGNING_KEY" > /tmp/ota-signing.key
+          echo "$OTA_SIGNING_CERT" > /tmp/ota-signing.crt
+          sudo mkdir -p "${CH}/tmp/ota"
+          sudo cp /tmp/ota-signing.key "${CH}/tmp/ota/signing.key"
+          sudo cp /tmp/ota-signing.crt "${CH}/tmp/ota/signing.crt"
+          rm -f /tmp/ota-signing.key /tmp/ota-signing.crt
+          sudo chroot "${CH}" chown -R builder:builder /tmp/ota
+          sudo chroot "${CH}" chmod 600 /tmp/ota/signing.key
+          sudo chroot "${CH}" /usr/bin/su - builder -c \
+            'cd /home/builder/arasaka && ARASAKA_SUDO_PASSWORD="ci" \
+             OTA_SIGNING_KEY="/tmp/ota/signing.key" \
+             OTA_SIGNING_CERT="/tmp/ota/signing.crt" \
+             ./build-bundle.sh'
+
       - name: Copy ISO out of chroot
         run: |
           set -euo pipefail
-          sudo cp "${CHROOT_DIR}/${REPO_DIR}"/build/*.iso "${GITHUB_WORKSPACE}/" 
+          sudo cp "${CHROOT_DIR}/${REPO_DIR}"/build/*.iso "${GITHUB_WORKSPACE}/"
           sudo chown "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}"/arasaka-*.iso
           ls -lh "${GITHUB_WORKSPACE}"/arasaka-*.iso
+
+      - name: Copy bundle out of chroot
+        run: |
+          set -euo pipefail
+          BUNDLE=$(sudo cat "${CHROOT_DIR}/${REPO_DIR}/build/bundle-path" 2>/dev/null || true)
+          if [ -n "$BUNDLE" ] && [ -f "${CHROOT_DIR}/${BUNDLE}" ]; then
+            sudo cp "${CHROOT_DIR}/${BUNDLE}" "${GITHUB_WORKSPACE}/"
+            sudo chown "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}"/arasaka-*.raucb
+            ls -lh "${GITHUB_WORKSPACE}"/arasaka-*.raucb
+          else
+            echo "No OTA bundle produced (secrets not configured?); skipping bundle publish"
+          fi
+
+      # Write update/stable/latest.json + latest.json.sig for the bundle. The
+      # pointer is signed with the same OTA signing key the devices trust.
+      - name: Write update pointer
+        if: always()
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          BUNDLE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.raucb 2>/dev/null | head -1 || true)
+          [ -n "$BUNDLE" ] || { echo "no bundle; skipping pointer"; exit 0; }
+          [ -n "$OTA_SIGNING_KEY" ] || { echo "no signing key; skipping pointer"; exit 0; }
+          mkdir -p "${GITHUB_WORKSPACE}/pointer"
+          python3 - "$BUNDLE" > "${GITHUB_WORKSPACE}/pointer/latest.json" <<'PY'
+          import hashlib, json, os, sys
+          bundle = sys.argv[1]
+          name = os.path.basename(bundle)
+          sha = hashlib.sha256()
+          with open(bundle, "rb") as f:
+              for chunk in iter(lambda: f.read(1 << 20), b""):
+                  sha.update(chunk)
+          print(json.dumps({
+              "version": name[len("arasaka-"):-len(".raucb")],
+              "bundle": name,
+              "sha256": sha.hexdigest(),
+              "size": os.path.getsize(bundle),
+          }, separators=(",", ":")))
+          PY
+          echo "$OTA_SIGNING_KEY" > /tmp/ota-pointer.key
+          openssl dgst -sha256 -sign /tmp/ota-pointer.key \
+            -out "${GITHUB_WORKSPACE}/pointer/latest.json.sig" \
+            "${GITHUB_WORKSPACE}/pointer/latest.json"
+          rm -f /tmp/ota-pointer.key
+          # Verify the pointer with the staged public key before publishing.
+          openssl x509 -in "${GITHUB_WORKSPACE}/config/rauc/signing.crt" -pubkey -noout 2>/dev/null \
+            | openssl dgst -sha256 -verify /dev/stdin \
+            -signature "${GITHUB_WORKSPACE}/pointer/latest.json.sig" \
+            "${GITHUB_WORKSPACE}/pointer/latest.json" \
+            || echo "::warning::pointer self-check failed"
+          cat "${GITHUB_WORKSPACE}/pointer/latest.json"
 
       # rclone's copy() does a HEAD check via the B2 *download* host, which
       # intermittently 403s from runner egress IPs (Unknown 403) and aborts the
@@ -308,6 +395,135 @@ jobs:
                   f"{api_url}/b2api/v3/b2_delete_file_version",
                   "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})])
           print(f"::notice::ISO uploaded to Backblaze B2 bucket {BUCKET}")
+          PY
+
+      # Upload the signed OTA bundle and update pointer to the updates bucket
+      # (B2_UPDATES_BUCKET, e.g. arasaka-updates). The bundle is uploaded
+      # first and the signed latest.json pointer LAST, so devices can never
+      # resolve a pointer to a half-uploaded bundle.
+      - name: Upload OTA bundle + pointer to Backblaze B2
+        if: always()
+        env:
+          B2_UPDATES_APPLICATION_KEY_ID: ${{ secrets.B2_UPDATES_APPLICATION_KEY_ID }}
+          B2_UPDATES_APPLICATION_KEY: ${{ secrets.B2_UPDATES_APPLICATION_KEY }}
+          B2_UPDATES_BUCKET: ${{ secrets.B2_UPDATES_BUCKET }}
+        run: |
+          set -euo pipefail
+          BUNDLE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.raucb 2>/dev/null | head -1 || true)
+          POINTER=$(ls "${GITHUB_WORKSPACE}"/pointer/latest.json 2>/dev/null || true)
+          [ -n "$BUNDLE" ] && [ -n "$POINTER" ] || { echo "no bundle/pointer; skipping OTA upload"; exit 0; }
+          if [ -z "$B2_UPDATES_APPLICATION_KEY_ID" ] || [ -z "$B2_UPDATES_APPLICATION_KEY" ] || [ -z "$B2_UPDATES_BUCKET" ]; then
+            echo "::error::B2_UPDATES secrets not configured. Add B2_UPDATES_APPLICATION_KEY_ID, B2_UPDATES_APPLICATION_KEY, B2_UPDATES_BUCKET."
+            exit 1
+          fi
+          python3 - "$BUNDLE" "$POINTER" <<'PY'
+          import hashlib, json, os, subprocess, sys, time
+
+          BUNDLE, POINTER = sys.argv[1], sys.argv[2]
+          KEY_ID = os.environ["B2_UPDATES_APPLICATION_KEY_ID"]
+          KEY = os.environ["B2_UPDATES_APPLICATION_KEY"]
+          BUCKET = os.environ["B2_UPDATES_BUCKET"]
+          PREFIX = "update/stable/"
+
+          def curl_json(args, data=None, body=None):
+              cmd = ["curl", "-sS"] + args + ["-w", "\n%{http_code}"]
+              if data is not None:
+                  cmd += ["--data-binary", data]
+              r = subprocess.run(cmd, input=body, capture_output=True)
+              out = r.stdout.decode(errors="replace")
+              code = out.rsplit("\n", 1)[-1].strip() if out else ""
+              if r.returncode != 0 or not code.startswith("2"):
+                  print("curl request failed:", r.stderr.decode(errors="replace"),
+                        "http", code, "body:", out[:600], file=sys.stderr)
+                  raise subprocess.CalledProcessError(
+                      r.returncode if r.returncode else int(code), r.args,
+                      (r.stderr + r.stdout)[:800])
+              return json.loads(out.rsplit("\n", 1)[0])
+
+          def retry(fn, n=4, delay=5):
+              for i in range(n):
+                  try:
+                      return fn()
+                  except (subprocess.CalledProcessError, json.JSONDecodeError):
+                      if i == n - 1:
+                          raise
+                      time.sleep(delay)
+
+          auth = retry(lambda: curl_json(["-u", f"{KEY_ID}:{KEY}",
+              "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"]))
+          token = auth["authorizationToken"]
+          auth_info = auth.get("apiInfo") or {}
+          api_url = (auth.get("apiUrl") or auth_info.get("apiUrl")
+              or (auth_info.get("storageApi") or {}).get("apiUrl"))
+          if not api_url:
+              raise SystemExit("cannot find apiUrl: " + json.dumps(auth)[:400])
+          print(f"authorized: api={api_url}")
+
+          buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_list_buckets",
+              "--data-binary", json.dumps({"accountId": auth.get("accountId", ""),
+                                           "bucketName": BUCKET})]))
+          bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
+          print(f"bucket {BUCKET} id {bucket_id}")
+
+          up = curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_get_upload_url",
+              "--data-binary", json.dumps({"bucketId": bucket_id})])
+          up_token = up.get("uploadAuthorizationToken") or up.get("authorizationToken")
+          if not up_token:
+              raise SystemExit("no token in get_upload_url: " + json.dumps(up)[:400])
+
+          def sha1_of(path):
+              h = hashlib.sha1()
+              with open(path, "rb") as src:
+                  for chunk in iter(lambda: src.read(1 << 20), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          import http.client, urllib.parse
+          u = urllib.parse.urlsplit(up["uploadUrl"])
+
+          def upload_file(local_path, b2_name):
+              with open(local_path, "rb") as src:
+                  size = os.path.getsize(local_path)
+                  conn = http.client.HTTPSConnection(u.hostname, timeout=3600)
+                  headers = {
+                      "Authorization": up_token,
+                      "X-Bz-File-Name": urllib.parse.quote(b2_name, safe=""),
+                      "X-Bz-Content-Sha1": sha1_of(local_path),
+                      "Content-Type": "application/octet-stream",
+                      "Content-Length": str(size),
+                  }
+                  conn.request("POST", u.path, body=src, headers=headers)
+                  resp = conn.getresponse()
+                  body = resp.read()
+                  conn.close()
+                  if resp.status != 200:
+                      raise subprocess.CalledProcessError(
+                          resp.status, "b2_upload_file", body.decode(errors="replace")[:600])
+                  print(f"uploaded {b2_name} ({size} bytes)")
+                  return json.loads(body)
+
+          def replace_existing(b2_name):
+              existing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+                  f"{api_url}/b2api/v3/b2_list_file_names",
+                  "--data-binary", json.dumps({"bucketId": bucket_id, "prefix": b2_name})]))
+              for f in existing.get("files", []):
+                  print(f"replacing existing {f['fileName']}")
+                  curl_json(["-H", f"Authorization: {token}",
+                      f"{api_url}/b2api/v3/b2_delete_file_version",
+                      "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})])
+
+          bundle_name = PREFIX + os.path.basename(BUNDLE)
+          print("uploading bundle first, pointer last")
+          replace_existing(bundle_name)
+          retry(lambda: upload_file(BUNDLE, bundle_name))
+
+          for f in ("latest.json", "latest.json.sig"):
+              b2_name = PREFIX + f
+              replace_existing(b2_name)
+              retry(lambda: upload_file(os.path.join(os.path.dirname(POINTER), f), b2_name))
+          print(f"::notice::OTA bundle + pointer uploaded to B2 bucket {BUCKET} under {PREFIX}")
           PY
 
       - name: Generate shareable download link

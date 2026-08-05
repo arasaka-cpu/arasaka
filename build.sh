@@ -120,6 +120,8 @@ strap() {
         plymouth \
         apparmor \
         fuse3 \
+        rauc \
+        desync \
         cups \
         foomatic-db \
         ghostscript \
@@ -1192,14 +1194,70 @@ ZSEOF
     '
 }
 
+configure_rauc() {
+    log "Configuring RAUC (signed OTA)..."
+
+    local rauc_dir="${ROOTFS}/etc/rauc"
+    local lib_rauc="${ROOTFS}/usr/lib/rauc"
+    run_quiet mkdir -p "${rauc_dir}" "${lib_rauc}" "${ROOTFS}/etc/arasaka"
+
+    # RAUC system configuration (A/B ext4 slots + custom systemd-boot backend).
+    run_quiet cp "$(dirname "$0")/config/rauc/system.conf" "${rauc_dir}/system.conf"
+
+    # Trusted keyring: the Arasaka OTA CA cert (public). Bundles must chain up
+    # to this certificate; the private CA/signing keys never leave CI.
+    run_quiet cp "$(dirname "$0")/config/rauc/ca.crt" "${rauc_dir}/keyring.pem"
+
+    # Custom bootloader backend + system-info handler.
+    run_quiet cp "$(dirname "$0")/scripts/rauc-boot-handler.sh" "${lib_rauc}/rauc-boot-handler.sh"
+    run_quiet chmod +x "${lib_rauc}/rauc-boot-handler.sh"
+    run_quiet cp "$(dirname "$0")/scripts/rauc-system-info.sh" "${lib_rauc}/system-info.sh"
+    run_quiet chmod +x "${lib_rauc}/system-info.sh"
+
+    # Public key used to verify the latest.json update pointer at runtime.
+    # Extracted from the staged signing certificate so `openssl dgst -verify`
+    # (which needs a public key PEM, not a cert) can use it directly.
+    openssl x509 -in "$(dirname "$0")/config/rauc/signing.crt" -pubkey -noout \
+        > "${ROOTFS}/etc/arasaka/ota-pub.pem"
+
+    # OTA channel config: which bucket/channel the update client polls. The
+    # BASE_URL is the public read path for the arasaka-updates B2 bucket.
+    cat > "${ROOTFS}/etc/arasaka/ota.conf" << OTAEOF
+# Arasaka OTA channel configuration
+CHANNEL=stable
+BASE_URL=${OTA_BASE_URL:-https://f005.backblazeb2.com/file/arasaka-updates}
+B2_KEY_ID=${OTA_B2_KEY_ID:-}
+B2_KEY=${OTA_B2_KEY:-}
+OTAEOF
+
+    # Baked-in system version (bundle version comparisons / diagnostics).
+    echo "${ARASAKA_VERSION:-$(date -u '+%Y%m%d')}" > "${ROOTFS}/etc/arasaka/version"
+
+    # The packaged rauc.service sandboxes heavily. The custom boot backend and
+    # the installer need to write /boot (loader.conf + per-slot kernels), write
+    # /data/rauc (slot state), mount slots/bundles under /mnt/rauc and, on
+    # install, call the backend which mounts the freshly-written slot to extract
+    # its kernel. Relax the packaged sandbox so those operations succeed.
+    run_quiet mkdir -p "${ROOTFS}/etc/systemd/system/rauc.service.d"
+    cat > "${ROOTFS}/etc/systemd/system/rauc.service.d/arasaka.conf" << 'RAUCDROPIN'
+[Service]
+ProtectSystem=off
+ProtectHome=off
+NoNewPrivileges=false
+CapabilityBoundingSet=
+RAUCDROPIN
+
+    run arch-chroot "${ROOTFS}" /bin/bash -c '
+        systemctl enable rauc.service 2>/dev/null || true
+    '
+}
+
 setup_immutable_layout() {
     log "Setting up immutable A/B layout..."
 
     run arch-chroot "${ROOTFS}" /bin/bash -c '
         mkdir -p /sysroot /boot/ab /var/lib/flatpak /var/lib/systemd
-        mkdir -p /var/tmp /var/log /var/cache /tmp /run /etc/arasaka /home
-
-        # Compressed RAM swap (zram). No disk swap partition: zram is faster,
+        mkdir -p /var/tmp /var/log /var/cache /tmp /run /etc/arasaka /home        # Compressed RAM swap (zram). No disk swap partition: zram is faster,
         # avoids wearing flash and avoids any swap-on-inactive-slot confusion.
         cat > /etc/systemd/zram-generator.conf << ZRAMEOF
 [zram0]
@@ -1295,6 +1353,9 @@ copy_services() {
         systemctl enable arasaka-reboot-after-update.timer 2>/dev/null || true
         systemctl enable arasaka-slot-mount 2>/dev/null || true
         systemctl enable arasaka-boot-succeeded.service 2>/dev/null || true
+        systemctl enable arasaka-persist-data.service 2>/dev/null || true
+        systemctl enable arasaka-verify-boot.service 2>/dev/null || true
+        systemctl enable arasaka-rauc-mark-good.service 2>/dev/null || true
     ' || true
 }
 
@@ -1412,6 +1473,7 @@ main() {
     configure_debloat
     configure_flatpak_apps
     configure_proton
+    configure_rauc
     setup_immutable_layout
     copy_services
     configure_plymouth

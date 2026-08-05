@@ -1,0 +1,12 @@
+[Unit]
+Description=Arasaka Persistent Data (bind flatpak/snap/snapd from /data)
+After=local-fs.target
+Before=snapd.service snapd.apparmor.service flatpak-system-update.service rauc.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arasaka-persist-data.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

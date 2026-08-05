@@ -1,0 +1,12 @@
+[Unit]
+Description=Arasaka RAUC boot verification (kernel hash -> mark-bad)
+After=arasaka-persist-data.service rauc.service
+RequiresMountsFor=/data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arasaka-verify-boot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
