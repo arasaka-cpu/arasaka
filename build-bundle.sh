@@ -69,7 +69,9 @@ version_of_rootfs() {
 build_slot_image() {
     log "Building ext4 slot image..."
     local used_mb size_mb
-    used_mb=$(du -smx "${ROOTFS}" | cut -f1)
+    # du must read the whole rootfs, parts of which are root-only; run it as
+    # root so the image is sized from the real, complete usage.
+    used_mb=$(run du -smx "${ROOTFS}" | cut -f1)
     size_mb=$(( (used_mb * 14 / 10) + 1024 ))   # +40% headroom + 1 GiB floor
     rm -f "${IMG}"
     run_quiet truncate -s "${size_mb}M" "${IMG}"
