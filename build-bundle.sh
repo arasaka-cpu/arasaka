@@ -21,6 +21,7 @@
 # via the OTA_SIGNING_KEY / OTA_SIGNING_CERT environment variables pointing at
 # PEM files (CI writes them from GitHub secrets; never committed).
 set -euo pipefail
+set -x
 
 NAME="arasaka"
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)/build"
@@ -28,6 +29,11 @@ ROOTFS="${BUILD_DIR}/rootfs"
 HARDENED="${BUILD_DIR}/bundle-rootfs"
 IMG="${BUILD_DIR}/rootfs.img"
 BUNDLE_DIR="${BUILD_DIR}/bundle"
+DEBUG_DIR="${BUILD_DIR}/debug"
+
+mkdir -p "${DEBUG_DIR}" || true
+# capture stderr to debug file as well
+exec 2> >(tee -a "${DEBUG_DIR}/build-bundle.err" >&2)
 
 # Sudo password handling mirrors build.sh.
 if [ -n "${ARASAKA_SUDO_PASSWORD:-}" ]; then
@@ -54,6 +60,20 @@ run_verbose() { echo "$PASSWORD" | sudo -S "$@"; }
 SIGN_KEY="${OTA_SIGNING_KEY:-}"
 SIGN_CERT="${OTA_SIGNING_CERT:-}"
 
+dump_system_info() {
+    log "--- system information ---"
+    df -h /tmp / || df -h || true
+    free -h || true
+    ulimit -a || true
+    for t in mksquashfs veritysetup rauc desync; do
+        if command -v "$t" >/dev/null 2>&1; then
+            printf '%s: ' "$t" >> "${DEBUG_DIR}/tool-versions.txt"
+            "$t" --version >> "${DEBUG_DIR}/tool-versions.txt" 2>&1 || true
+        fi
+    done
+    log "--- end system information ---"
+}
+
 check() {
     [ -d "${ROOTFS}" ] || die "rootfs not found at ${ROOTFS}; run ./build.sh first"
     [ -f "${ROOTFS}/boot/vmlinuz-linux" ] || die "no kernel in rootfs (/boot/vmlinuz-linux)"
@@ -63,6 +83,7 @@ check() {
     [ -n "$SIGN_KEY" ] && [ -f "$SIGN_KEY" ] || die "OTA_SIGNING_KEY must point at the signing private key PEM"
     [ -n "$SIGN_CERT" ] && [ -f "$SIGN_CERT" ] || die "OTA_SIGNING_CERT must point at the signing certificate PEM"
     [ -f "$(dirname "$0")/config/rauc/ca.crt" ] || die "staged CA missing: config/rauc/ca.crt"
+    dump_system_info
 }
 
 version_of_rootfs() {
@@ -138,12 +159,37 @@ build_rootfs_img() {
     # produced identically.
     log "Building squashfs + dm-verity slot image..."
     rm -f "${IMG}"
+    mkdir -p "${DEBUG_DIR}"
     local vout
-    vout=$(run_verbose "$(dirname "$0")/scripts/make-verity-slot.sh" "${HARDENED}" "${IMG}")
-    ROOT_HASH=$(printf '%s\n' "${vout}" | sed -n 's/^root_hash=//p')
-    HASH_OFFSET=$(printf '%s\n' "${vout}" | sed -n 's/^hash_offset=//p')
-    [ -n "${ROOT_HASH}" ] && [ -n "${HASH_OFFSET}" ] \
-        || die "make-verity-slot.sh failed (no root hash/offset captured)"
+    # capture output to both a variable and a debug file
+    vout=$(run_verbose "$(dirname "$0")/scripts/make-verity-slot.sh" "${HARDENED}" "${IMG}" 2>&1) || true
+    printf '%s
+' "${vout}" > "${DEBUG_DIR}/make-verity-output.txt"
+
+    ROOT_HASH=$(printf '%s
+' "${vout}" | sed -n 's/^root_hash=\(.*\)/\1/p' | tr -d '\r' || true)
+    HASH_OFFSET=$(printf '%s
+' "${vout}" | sed -n 's/^hash_offset=\(.*\)/\1/p' | tr -d '\r' || true)
+    # fallback: if make-verity printed on a single line like "root_hash=... hash_offset=..."
+    if [ -z "$ROOT_HASH" ] || [ -z "$HASH_OFFSET" ]; then
+        ROOT_HASH=$(printf '%s
+' "${vout}" | sed -n 's/^root_hash=\([^ ]*\) .*/\1/p' || true)
+        HASH_OFFSET=$(printf '%s
+' "${vout}" | sed -n 's/.*hash_offset=\([^ ]*\)$/\1/p' || true)
+    fi
+
+    if [ -z "${ROOT_HASH}" ] || [ -z "${HASH_OFFSET}" ]; then
+        log "make-verity-slot did not produce root hash/hash offset. Dumping debug output..."
+        echo "---- make-verity output (first 400 lines) ----" >&2
+        sed -n '1,400p' "${DEBUG_DIR}/make-verity-output.txt" >&2 || true
+        echo "---- listing build dir ----" >&2
+        ls -lh "${BUILD_DIR}" || true
+        echo "---- file sizes ----" >&2
+        du -sh "${BUILD_DIR}"/* || true
+        df -h /tmp / || df -h || true
+        die "make-verity-slot.sh failed (no root hash/offset captured)"
+    fi
+
     log "Verity root hash: ${ROOT_HASH}"
     log "Hash offset:      ${HASH_OFFSET}"
 }
@@ -174,7 +220,7 @@ case "\$1" in
         # /boot is the shared writable partition; the arasaka-ab initramfs hook
         # reads this to open the slot via dm-verity on the next boot.
         mkdir -p /boot/ab
-        printf 'root_hash=%s\nhash_offset=%s\n' "\$ROOT_HASH" "\$HASH_OFFSET" \\
+        printf 'root_hash=%s\nhash_offset=%s\n' "\$ROOT_HASH" "\$HASH_OFFSET" \
             > "/boot/ab/verity-\${slot}.conf"
         # Per-device machine-id: create once, never overwrite (systemd identity
         # must be stable across updates).
@@ -235,6 +281,7 @@ main() {
 
     prepare_hardened_rootfs
     build_rootfs_img
+    # keep the hardened rootfs around for debugging if something went wrong
     run_quiet rm -rf "${HARDENED}"
 
     write_bundle
