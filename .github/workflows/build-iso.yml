@@ -534,8 +534,9 @@ jobs:
           B2_BUCKET: ${{ secrets.B2_BUCKET }}
         run: |
           set -euo pipefail
-          FILE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso 2>/dev/null | head -1 | xargs basename)
+          FILE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso 2>/dev/null | head -1 || true)
           [ -n "$FILE" ] || { echo "no iso to link"; exit 0; }
+          FILE=${FILE##*/}
           python3 -m pip install --user -q --break-system-packages b2 2>/dev/null || true
           export PATH="$HOME/.local/bin:$PATH"
           B2_APPLICATION_KEY_ID="$B2_APPLICATION_KEY_ID" \

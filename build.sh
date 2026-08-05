@@ -1217,12 +1217,16 @@ configure_rauc() {
     # Public key used to verify the latest.json update pointer at runtime.
     # Extracted from the staged signing certificate so `openssl dgst -verify`
     # (which needs a public key PEM, not a cert) can use it directly.
+    # /etc/arasaka in the rootfs is root-owned (created above via sudo), so
+    # files are staged in a temp dir and copied in through sudo.
+    local tmpdir
+    tmpdir="$(mktemp -d)"
     openssl x509 -in "$(dirname "$0")/config/rauc/signing.crt" -pubkey -noout \
-        > "${ROOTFS}/etc/arasaka/ota-pub.pem"
+        > "${tmpdir}/ota-pub.pem"
 
     # OTA channel config: which bucket/channel the update client polls. The
     # BASE_URL is the public read path for the arasaka-updates B2 bucket.
-    cat > "${ROOTFS}/etc/arasaka/ota.conf" << OTAEOF
+    cat > "${tmpdir}/ota.conf" << OTAEOF
 # Arasaka OTA channel configuration
 CHANNEL=stable
 BASE_URL=${OTA_BASE_URL:-https://f005.backblazeb2.com/file/arasaka-updates}
@@ -1230,8 +1234,12 @@ B2_KEY_ID=${OTA_B2_KEY_ID:-}
 B2_KEY=${OTA_B2_KEY:-}
 OTAEOF
 
+    run_quiet cp "${tmpdir}/ota-pub.pem" "${ROOTFS}/etc/arasaka/ota-pub.pem"
+    run_quiet cp "${tmpdir}/ota.conf" "${ROOTFS}/etc/arasaka/ota.conf"
+
     # Baked-in system version (bundle version comparisons / diagnostics).
-    echo "${ARASAKA_VERSION:-$(date -u '+%Y%m%d')}" > "${ROOTFS}/etc/arasaka/version"
+    echo "${ARASAKA_VERSION:-$(date -u '+%Y%m%d')}" > "${tmpdir}/version"
+    run_quiet cp "${tmpdir}/version" "${ROOTFS}/etc/arasaka/version"
 
     # The packaged rauc.service sandboxes heavily. The custom boot backend and
     # the installer need to write /boot (loader.conf + per-slot kernels), write
@@ -1239,13 +1247,16 @@ OTAEOF
     # install, call the backend which mounts the freshly-written slot to extract
     # its kernel. Relax the packaged sandbox so those operations succeed.
     run_quiet mkdir -p "${ROOTFS}/etc/systemd/system/rauc.service.d"
-    cat > "${ROOTFS}/etc/systemd/system/rauc.service.d/arasaka.conf" << 'RAUCDROPIN'
+    cat > "${tmpdir}/rauc-dropin.conf" << 'RAUCDROPIN'
 [Service]
 ProtectSystem=off
 ProtectHome=off
 NoNewPrivileges=false
 CapabilityBoundingSet=
 RAUCDROPIN
+    run_quiet cp "${tmpdir}/rauc-dropin.conf" \
+        "${ROOTFS}/etc/systemd/system/rauc.service.d/arasaka.conf"
+    rm -rf "${tmpdir}"
 
     run arch-chroot "${ROOTFS}" /bin/bash -c '
         systemctl enable rauc.service 2>/dev/null || true
