@@ -113,11 +113,12 @@ create_update_chroot() {
     # rsync is used because it supports --exclude reliably on any coreutils
     # implementation (uutils cp 0.9 does not implement --exclude).
     #
-    # The running root is mounted ro with overlayfs over /etc and /var and
-    # bind mounts over /home (all separate filesystems). --one-file-system
-    # therefore skips them; each overlay gets its own rsync pass below so the
-    # update chroot carries the current configuration (machine-id, hostname,
-    # resolv, fstab) instead of an empty /etc and /var.
+    # The running root is mounted ro with an overlayfs over /var and bind
+    # mounts over /home and the /etc runtime state (all separate filesystems).
+    # --one-file-system therefore skips them; each overlay/bind gets its own
+    # rsync pass below so the update chroot carries the current configuration
+    # (machine-id, hostname, resolv, fstab, wifi/printers) instead of empty or
+    # stale state.
     log "Copying current rootfs to chroot..."
     rsync -aHAX --one-file-system \
         --exclude=/proc \
@@ -152,12 +153,7 @@ create_update_chroot() {
 
     # Re-attach the overlay state (they are distinct filesystems, so the
     # one-file-system pass above created empty mountpoint dirs for them).
-    log "Copying /etc and /var overlays into chroot..."
-    if [ -d /etc ]; then
-        rsync -aHAX --delete \
-            --exclude=/etc/arasaka/booted-slot \
-            /etc/ "${CHROOT_DIR}/etc/" 2>/dev/null || true
-    fi
+    log "Copying /var overlay and /etc runtime state into chroot..."
     if [ -d /var ]; then
         rsync -aHAX --delete \
             --exclude=/var/lib/flatpak \
@@ -169,6 +165,17 @@ create_update_chroot() {
             --exclude=/var/tmp \
             /var/ "${CHROOT_DIR}/var/" 2>/dev/null || true
     fi
+
+    # /etc is part of the ro slot image, so the main pass already copied it.
+    # The only parts of /etc that change at runtime are bound from /data
+    # (NetworkManager connections, CUPS printers) - carry that state into the
+    # chroot so the new slot boots with the current wifi/printers.
+    for d in NetworkManager cups; do
+        if [ -d "/etc/${d}" ]; then
+            mkdir -p "${CHROOT_DIR}/etc/${d}"
+            rsync -aHAX "/etc/${d}/" "${CHROOT_DIR}/etc/${d}/" 2>/dev/null || true
+        fi
+    done
 
     # Mount virtual filesystems (mount points are excluded from the copy
     # above, so create them first).

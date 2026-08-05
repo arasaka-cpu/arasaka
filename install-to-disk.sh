@@ -243,8 +243,10 @@ BEOF
 
     # Create fstab for the installed system. /boot stays writable (A/B swap
     # markers + kernel extraction); /var/tmp is tmpfs because the root slot is
-    # mounted read-only. /etc and /var get overlayfs from /data in the
-    # initramfs hook, so no fstab entry is needed for them.
+    # mounted read-only. /etc is part of the ro image (its runtime state -
+    # NetworkManager/cups - is bound from /data by persist-data), and /var
+    # gets overlayfs from /data in the initramfs hook, so no fstab entry is
+    # needed for them.
     sudo tee "${mnt}/slot-a/etc/fstab" >/dev/null << FSTABEOF
 # Arasaka fstab - systemd manages mounts
 /dev/disk/by-label/arasaka-boot    /boot           ext4    defaults,noatime 0 2
@@ -256,6 +258,11 @@ FSTABEOF
     # Copy install scripts to the installed system
     sudo cp "$(dirname "$0")/scripts/"*.sh "${mnt}/slot-a/usr/local/bin/" 2>/dev/null || true
     sudo chmod +x "${mnt}/slot-a/usr/local/bin/"*.sh 2>/dev/null || true
+
+    # Harden the installed slot exactly like a Calamares install: no sudo/su,
+    # no wheel, no installer, AppArmor guard armed, fresh machine-id (the raw
+    # build rootfs is the live-style image and must be locked down before use).
+    sudo "${mnt}/slot-a/usr/local/bin/arasaka-finalize-install.sh" "${mnt}/slot-a"
 
     # Unmount everything
     log "Unmounting..."

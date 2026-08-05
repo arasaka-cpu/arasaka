@@ -10,12 +10,14 @@
 # successfully.
 #
 # Immutability: the slot root is mounted ro and stays ro for the whole
-# boot. The only writable state on the running system lives on the btrfs
-# data partition (/data): /etc and /var get overlayfs mounts on top of
-# the ro slot (upper dirs on /data), and the persist-data service binds
-# the @home/@log/... subvolumes in at runtime. /tmp and /run are tmpfs
-# (systemd), so every path a desktop actually writes is covered while
-# /usr, /lib, /bin and /boot stay read-only.
+# boot. The ONLY writable state on the running system lives on the btrfs
+# data partition (/data): /var gets an overlayfs mount on top of the ro
+# slot (upper dir on /data), /etc stays part of the read-only image (only
+# its runtime config state - NetworkManager, cups, machine-id - is bound
+# from /data by the persist-data service), and the persist-data service
+# binds the @home/@log/... subvolumes in at runtime. /tmp and /run are
+# tmpfs (systemd), so every path a desktop actually writes is covered
+# while /usr, /lib, /bin, /etc and /boot stay read-only.
 #
 # On a fresh install (no pending swap) this behaves like the stock
 # mkinitcpio mount handler, using the kernel cmdline root= as a fallback.
@@ -67,22 +69,22 @@ try_mount_slot() {
     rootdev="$(find_slot_partition "$slot")" || return 1
     [ -b "$rootdev" ] || return 1
     mkdir -p "$newroot"
-    # Mount the slot READ-ONLY: the rootfs is immutable. Writable state is
-    # layered on top (overlayfs for /etc + /var) from the data partition.
+    # Mount the slot READ-ONLY: the rootfs (incl. /etc) is immutable.
+    # Writable state is layered on top (overlayfs for /var) from the data
+    # partition; /etc runtime config is bound from /data by persist-data.
     mount -o ro "$rootdev" "$newroot" 2>/dev/null || return 1
-    mkdir -p "$newroot/etc/arasaka" 2>/dev/null
-    echo "$slot" > "$newroot/etc/arasaka/booted-slot" 2>/dev/null || true
     return 0
 }
 
 overlay_writable_dirs() {
-    # $1 = newroot. Best-effort: overlay /etc and /var on top of the ro slot
-    # with upper/work dirs on the btrfs data partition, so user state survives
-    # A/B updates (data is never rewritten). Never fails the boot - if /data
-    # is missing the system comes up with a fully read-only root instead.
+    # $1 = newroot. Best-effort: overlay /var on top of the ro slot with
+    # upper/work dirs on the btrfs data partition, so user state survives
+    # A/B updates (data is never rewritten). /etc is intentionally NOT
+    # overlaid - it stays part of the immutable image. Never fails the
+    # boot - if /data is missing the system comes up fully read-only.
     local newroot="$1" datadev datamnt
     datadev="$(find_data_partition)" || {
-        msg "Arasaka A/B: no data partition - /etc and /var stay read-only"
+        msg "Arasaka A/B: no data partition - /var stays read-only"
         return 0
     }
     datamnt="${newroot}/data"
@@ -92,7 +94,7 @@ overlay_writable_dirs() {
         return 0
     fi
 
-    for d in etc var; do
+    for d in var; do
         mkdir -p "$datamnt/overlay/${d}-upper" "$datamnt/overlay/${d}-work"
         if mount -t overlay overlay \
             -o "lowerdir=${newroot}/${d},upperdir=${datamnt}/overlay/${d}-upper,workdir=${datamnt}/overlay/${d}-work" \

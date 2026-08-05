@@ -115,7 +115,11 @@ copy_kernel_from_slot() {
 
     rm -rf "${MNT}"
     mkdir -p "${MNT}"
-    mount -o ro "${dev}" "${MNT}" || die "cannot mount ${dev} for kernel extraction"
+    # Mount rw briefly: this is the freshly-installed slot being prepared for
+    # its first boot, and the machine-id must be regenerated per device (the
+    # image's baked id is shared by every device running the same bundle,
+    # which would collide on DHCP/network identities).
+    mount -o rw "${dev}" "${MNT}" || die "cannot mount ${dev} for kernel extraction"
 
     # Pick the highest-versioned kernel inside the new rootfs (generic naming
     # from the Arch linux package or a custom A/B build).
@@ -132,6 +136,17 @@ copy_kernel_from_slot() {
     cp "${MNT}/boot/${imgname}" "${tmpi}"
     mv -f "${tmpk}" "${BOOT_DIR}/vmlinuz-arasaka-${slot}"
     mv -f "${tmpi}" "${BOOT_DIR}/initramfs-arasaka-${slot}.img"
+
+    # Per-device machine-id (see above). Use the tool if present, else a
+    # random 32-hex value; systemd derives all further identity from this.
+    if [ -x "${MNT}/usr/lib/systemd/systemd-machine-id-setup" ] || [ -x "${MNT}/usr/bin/systemd-machine-id-setup" ]; then
+        rm -f "${MNT}/etc/machine-id"
+        arch-chroot "${MNT}" /usr/bin/systemd-machine-id-setup 2>/dev/null || true
+    fi
+    if [ ! -s "${MNT}/etc/machine-id" ]; then
+        od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "${MNT}/etc/machine-id"
+        chmod 444 "${MNT}/etc/machine-id"
+    fi
 
     umount "${MNT}" 2>/dev/null || true
     rm -rf "${MNT}"

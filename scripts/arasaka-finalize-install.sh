@@ -23,6 +23,21 @@ TARGET="${TARGET%/}"
 
 echo "[arasaka-finalize] Hardening installed system at ${TARGET}"
 
+# --- machine-id -------------------------------------------------------------
+# The baked image id would be shared by every device that installs the same
+# image, causing DHCP/network-identity collisions. Regenerate it here (per
+# install) and in the bundle builder + RAUC boot handler so every device ends
+# up unique. systemd derives further state from this single value, so a random
+# 32-hex id is sufficient.
+if [ -x "${TARGET}/usr/lib/systemd/systemd-machine-id-setup" ] || [ -x "${TARGET}/usr/bin/systemd-machine-id-setup" ]; then
+    rm -f "${TARGET}/etc/machine-id"
+    systemd-machine-id-setup --root="${TARGET}" 2>/dev/null || true
+fi
+if [ ! -s "${TARGET}/etc/machine-id" ]; then
+    printf '%s\n' "$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" > "${TARGET}/etc/machine-id" 2>/dev/null || true
+    chmod 444 "${TARGET}/etc/machine-id" 2>/dev/null || true
+fi
+
 # --- No privilege escalation -----------------------------------------------
 # Strip every account from wheel / sudo in /etc/group (incl. the leftover live
 # ISO "user"), regardless of whether a group line is empty or has members.
@@ -42,9 +57,16 @@ fi
 # it is the ONLY real account, it is the account Calamares set up (or the only
 # account a bundle lands on), so leave it alone.
 if [ -f "${TARGET}/etc/passwd" ] && [ -f "${TARGET}/etc/shadow" ]; then
-    other_accounts=$(grep -Ev '^#|^$' "${TARGET}/etc/passwd" | while IFS=: read -r name _ uid _; do
-        [ "$uid" -ge 1000 ] 2>/dev/null && [ "$name" != "user" ] && echo "$name"
-    done)
+    other_accounts=""
+    while IFS=: read -r name _ uid _; do
+        [ -n "$name" ] || continue
+        case "$name" in
+            \#*) continue ;;
+        esac
+        if [ "${uid:-0}" -ge 1000 ] 2>/dev/null && [ "$name" != "user" ]; then
+            other_accounts="$name"
+        fi
+    done < "${TARGET}/etc/passwd"
     if [ -n "$other_accounts" ]; then
         sed -i 's/^user:\([^:]*\):/user:!:/' "${TARGET}/etc/shadow"
         echo "[arasaka-finalize] Live 'user' account locked (other real accounts exist)"

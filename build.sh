@@ -615,6 +615,16 @@ DefaultEnvironment=XDG_CURRENT_DESKTOP=cosmic
 DefaultEnvironment=XDG_SESSION_TYPE=wayland
 DefaultEnvironment=GTK_USE_PORTAL=1
 ENVEOF
+
+        # Restrict the user-session systemd manager: it is unprivileged and
+        # cannot touch system units (polkit denies org.freedesktop.systemd1.*
+        # and there is no sudo/su/pkexec), so cap what a single session can
+        # spawn. Each user unit inherits this limit.
+        cat > /etc/systemd/user.conf.d/10-arasaka-restrict.conf << ENVEOF
+[Manager]
+DefaultTasksMax=256
+DefaultLimitNPROC=512
+ENVEOF
     '
 }
 
@@ -686,11 +696,14 @@ EOF
 
     # Default-deny polkit policy for non-root users (live AND installed). The
     # desktop user may only: install/update Flatpaks, manage Wi-Fi/NetworkManager,
-    # Bluetooth (bluez), printers (CUPS), and power/brightness via logind/UPower.
-    # The live installer's pkexec actions are exempted. Everything else - in
-    # particular org.freedesktop.systemd1.* (unit control), udisks2 mount/unmount,
-    # fwupd/AppArmor and anything touching filesystems - is explicitly denied.
-    # Root (uid 0) is untouched; polkit does not constrain uid 0 anyway.
+    # Bluetooth (bluez), printers (CUPS), power/brightness via logind/UPower, and
+    # mount/unmount/eject removable media (auto-mount of USB/external disks -
+    # udisks2's plain filesystem-mount action only covers removable drives;
+    # mounting the internal A/B slots uses filesystem-mount-system, which stays
+    # denied). The live installer's pkexec actions are exempted. Everything else -
+    # in particular org.freedesktop.systemd1.* (unit control), fwupd/AppArmor and
+    # anything touching system filesystems - is explicitly denied. Root (uid 0) is
+    # untouched; polkit does not constrain uid 0 anyway.
     cat > "${ROOTFS}/etc/polkit-1/rules.d/10-arasaka-policy.rules" << 'EOF'
 polkit.addRule(function(action, subject) {
     if (subject.user === "root") {
@@ -707,6 +720,9 @@ polkit.addRule(function(action, subject) {
         "org.freedesktop.login1.suspend",
         "org.freedesktop.login1.hibernate",
         "org.freedesktop.login1.set-brightness",
+        "org.freedesktop.udisks2.filesystem-mount",
+        "org.freedesktop.udisks2.filesystem-unmount",
+        "org.freedesktop.udisks2.eject-media",
         "io.calamares.calamares.pkexec.run",
         "org.arasaka.installer.pkexec.run"
     ];
@@ -720,8 +736,15 @@ polkit.addRule(function(action, subject) {
     if (action.id.indexOf("org.freedesktop.systemd1.") === 0) {
         return polkit.Result.NO;
     }
-    if (action.id.indexOf("org.freedesktop.udisks2.filesystem-mount") === 0 ||
-        action.id.indexOf("org.freedesktop.udisks2.filesystem-unmount") === 0) {
+    // User sessions must not linger after logout (no background user services,
+    // no persistent systemctl --user units) and must not control system units.
+    if (action.id.indexOf("org.freedesktop.login1.set-user-linger") === 0 ||
+        action.id.indexOf("org.freedesktop.login1.set-user-linger-handheld") === 0) {
+        return polkit.Result.NO;
+    }
+    if (action.id.indexOf("org.freedesktop.udisks2.filesystem-mount-system") === 0 ||
+        action.id.indexOf("org.freedesktop.udisks2.filesystem-unmount-others") === 0 ||
+        action.id.indexOf("org.freedesktop.udisks2.filesystem-mount-other-seat") === 0) {
         return polkit.Result.NO;
     }
     if (action.id.indexOf("org.apparmor.") === 0) {
@@ -1333,7 +1356,14 @@ setup_immutable_layout() {
 
     run arch-chroot "${ROOTFS}" /bin/bash -c '
         mkdir -p /sysroot /boot/ab /var/lib/flatpak /var/lib/systemd
-        mkdir -p /var/tmp /var/log /var/cache /tmp /run /etc/arasaka /home        # Compressed RAM swap (zram). No disk swap partition: zram is faster,
+        mkdir -p /var/tmp /var/log /var/cache /tmp /run /etc/arasaka /home
+
+        # A valid machine-id in the image means systemd never needs to persist
+        # one (the installed root is read-only). The id is regenerated per
+        # device at install time (finalize-install / RAUC boot handler).
+        systemd-machine-id-setup 2>/dev/null || true
+
+        # Compressed RAM swap (zram). No disk swap partition: zram is faster,
         # avoids wearing flash and avoids any swap-on-inactive-slot confusion.
         cat > /etc/systemd/zram-generator.conf << ZRAMEOF
 [zram0]
