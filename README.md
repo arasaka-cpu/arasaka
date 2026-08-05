@@ -161,14 +161,3 @@ Required repository secrets:
 | `OTA_SIGNING_KEY` | Private key matching `config/rauc/signing.crt`. |
 | `OTA_SIGNING_CERT` | The OTA signing certificate. |
 
-## Security notes
-
-- RAUC bundles are cryptographically signed; devices only trust the keyring
-  baked into the image (`/etc/rauc/keyring.pem`). The update pointer carries a
-  detached signature verified against the OTA public key.
-- The OTA signing key and the B2 update key are **never committed**. If a
-  private key is ever exposed, rotate it and update the secrets (and, for the
-  RAUC keyring, the baked-in `keyring.pem`) before shipping new bundles.
-- The staged `ca.crt` / `signing.crt` under `config/rauc/` are the development
-  PKI. Replace them with production certificates before releasing to real
-  devices.
