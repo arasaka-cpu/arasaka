@@ -19,8 +19,17 @@
 #     copies them into /boot per-slot, atomically (.tmp + rename).
 #   - Kernel cmdline carries rauc.slot=A/B so RAUC can detect the booted slot.
 #
+# Slots are RAW squashfs+dm-verity images (no filesystem, no label), so they
+# are addressed by GPT partition label and the kernel/initramfs are extracted
+# with unsquashfs (a squashfs mount cannot be written and relabeling is
+# meaningless on a raw container).
+#
 # Boot state is persisted on the data partition (/data/rauc/boot) so it
 # survives the slot swap. On a fresh install every slot defaults to good.
+#
+# The machine-id is per-device and lives on /boot (/boot/ab/machine-id, bound
+# into /etc/machine-id by the initramfs hook) - the squashfs slots are
+# read-only, so it can never be regenerated inside a slot.
 #
 # The legacy /boot/ab A/B markers (active-slot / swap-pending) are kept in
 # sync so the arasaka-ab initramfs hook and arasaka-boot-succeeded.service
@@ -33,7 +42,9 @@ LOADER_CONF="${BOOT_DIR}/loader/loader.conf"
 ENTRIES_DIR="${BOOT_DIR}/loader/entries"
 AB_DIR="${BOOT_DIR}/ab"
 STATE_DIR="/data/rauc/boot"
-MNT="/mnt/rauc/new-slot"
+# Scratch dir for kernel extraction. /data is mounted before rauc.service runs
+# (arasaka-persist-data orders itself Before=rauc.service) and is writable.
+MNT="/data/rauc/new-slot"
 
 log() { echo "[rauc-boot] $*" >&2; }
 die() { echo "[rauc-boot] FATAL: $*" >&2; exit 1; }
@@ -103,25 +114,42 @@ sync_legacy_markers() {
     sync
 }
 
+slot_device() { # slot letter (a|b) -> block device (partlabel first)
+    local slot="$1"
+    if [ -b "/dev/disk/by-partlabel/arasaka-slot-${slot}" ]; then
+        echo "/dev/disk/by-partlabel/arasaka-slot-${slot}"
+    elif [ -b "/dev/disk/by-label/arasaka-slot-${slot}" ]; then
+        echo "/dev/disk/by-label/arasaka-slot-${slot}"
+    else
+        return 1
+    fi
+}
+
 copy_kernel_from_slot() {
     # Extract the kernel+initramfs from the freshly-written rootfs slot into
-    # /boot using per-slot names, written atomically.
+    # /boot using per-slot names, written atomically. The slot is a raw
+    # squashfs image (no filesystem to mount), so it is read with unsquashfs.
     local slot="$1" bootname="$2" dev kname imgname tmpk tmpi
-    dev="/dev/disk/by-label/arasaka-slot-${slot}"
+    dev=$(slot_device "${slot}") || die "slot device for '${slot}' not found"
     [ -b "${dev}" ] || die "slot device ${dev} not found"
 
     rm -rf "${MNT}"
     mkdir -p "${MNT}"
-    mount -o ro "${dev}" "${MNT}" || die "cannot mount ${dev} for kernel extraction"
 
     # Pick the highest-versioned kernel inside the new rootfs (generic naming
     # from the Arch linux package or a custom A/B build).
-    kname=$(ls "${MNT}/boot"/vmlinuz* 2>/dev/null | sort -V | tail -1 | xargs basename 2>/dev/null || true)
-    imgname=$(ls "${MNT}/boot"/initramfs-*.img 2>/dev/null | sort -V | tail -1 | xargs basename 2>/dev/null || true)
+    kname=$(unsquashfs -ll "${dev}" 2>/dev/null \
+        | awk '/\/boot\/vmlinuz/ { n=$NF; sub(/^squashfs-root\//, "", n); print n }' \
+        | sort -V | tail -1 || true)
+    imgname=$(unsquashfs -ll "${dev}" 2>/dev/null \
+        | awk '/\/boot\/initramfs/ { n=$NF; sub(/^squashfs-root\//, "", n); print n }' \
+        | sort -V | tail -1 || true)
     [ -n "${kname}" ] || die "no kernel found in new slot ${slot}"
     [ -n "${imgname}" ] || die "no initramfs found in new slot ${slot}"
 
     log "extracting ${kname} / ${imgname} from slot ${slot}"
+    unsquashfs -quiet -no-progress -n -f -d "${MNT}" "${dev}" \
+        "boot/${kname}" "boot/${imgname}" || die "cannot extract kernel from slot ${slot}"
 
     tmpk="${BOOT_DIR}/vmlinuz-arasaka-${slot}.tmp"
     tmpi="${BOOT_DIR}/initramfs-arasaka-${slot}.img.tmp"
@@ -130,7 +158,16 @@ copy_kernel_from_slot() {
     mv -f "${tmpk}" "${BOOT_DIR}/vmlinuz-arasaka-${slot}"
     mv -f "${tmpi}" "${BOOT_DIR}/initramfs-arasaka-${slot}.img"
 
-    umount "${MNT}" 2>/dev/null || true
+    # Ensure a per-device machine-id exists on /boot (the initramfs binds it
+    # over the slot's baked /etc/machine-id). The bundle's post-install hook
+    # normally creates it; be defensive for systems installed before this
+    # landed. Never overwrite an existing id (systemd identity must be stable).
+    if [ ! -s "${AB_DIR}/machine-id" ]; then
+        mkdir -p "${AB_DIR}"
+        od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "${AB_DIR}/machine-id" 2>/dev/null || true
+        chmod 444 "${AB_DIR}/machine-id" 2>/dev/null || true
+    fi
+
     rm -rf "${MNT}"
 }
 

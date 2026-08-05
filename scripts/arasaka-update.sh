@@ -18,8 +18,11 @@
 set -euo pipefail
 
 SLOT_FILE="/boot/ab/active-slot"
-CHROOT_DIR="/var/tmp/arasaka-update-chroot"
-INACTIVE_SLOT_DIR="/var/tmp/arasaka-inactive"
+# The running rootfs is read-only (mount ro in the initramfs hook), so /var/tmp
+# cannot hold the update chroot or the inactive-slot mount point. Both live on
+# the writable btrfs data partition instead.
+CHROOT_DIR="/data/update/chroot"
+INACTIVE_SLOT_DIR="/data/update/inactive"
 LOG_FILE="/var/log/arasaka-update.log"
 
 log() { echo "[arasaka-update] $(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"; }
@@ -75,20 +78,47 @@ cleanup() {
             umount -lf "${CHROOT_DIR}/${mp}" 2>/dev/null || true
         fi
     done
+    if mountpoint -q "${INACTIVE_SLOT_DIR}" 2>/dev/null; then
+        umount -lf "${INACTIVE_SLOT_DIR}" 2>/dev/null || true
+    fi
     rm -rf "${CHROOT_DIR}"
     rm -rf "${INACTIVE_SLOT_DIR}"
     rm -f /var/lock/arasaka-update.lock
 }
 trap cleanup EXIT
 
+# The update scratch space lives on /data (the rootfs is read-only). Make sure
+# /data is mounted and writable before anything else.
+ensure_data_mounted() {
+    if ! mountpoint -q /data; then
+        local dev
+        dev=$(blkid -L arasaka-data 2>/dev/null || true)
+        if [ -z "$dev" ] || [ ! -b "$dev" ]; then
+            dev="/dev/disk/by-label/arasaka-data"
+        fi
+        [ -b "$dev" ] || die "/data not mounted and no data partition found; cannot update"
+        mkdir -p /data
+        mount -t btrfs -o compress=zstd "$dev" /data 2>/dev/null || mount "$dev" /data
+    fi
+    [ -w /data ] || die "/data is not writable; cannot update"
+}
+
 create_update_chroot() {
     log "Creating temporary update chroot..."
+    ensure_data_mounted
     rm -rf "${CHROOT_DIR}"
     mkdir -p "${CHROOT_DIR}"
 
     # Copy current rootfs into chroot (skip mutable/virtual dirs).
     # rsync is used because it supports --exclude reliably on any coreutils
     # implementation (uutils cp 0.9 does not implement --exclude).
+    #
+    # The running root is mounted ro with an overlayfs over /var and bind
+    # mounts over /home and the /etc runtime state (all separate filesystems).
+    # --one-file-system therefore skips them; each overlay/bind gets its own
+    # rsync pass below so the update chroot carries the current configuration
+    # (machine-id, hostname, resolv, fstab, wifi/printers) instead of empty or
+    # stale state.
     log "Copying current rootfs to chroot..."
     rsync -aHAX --one-file-system \
         --exclude=/proc \
@@ -101,6 +131,12 @@ create_update_chroot() {
         --exclude=/boot \
         --exclude=/data \
         --exclude=/var/lib/flatpak \
+        --exclude=/var/snap \
+        --exclude=/var/lib/snapd \
+        --exclude=/var/lib/systemd \
+        --exclude=/var/log \
+        --exclude=/var/cache \
+        --exclude=/home \
         / "${CHROOT_DIR}/" 2>/dev/null || \
     cp -a --one-file-system \
         --exclude=/proc \
@@ -114,6 +150,32 @@ create_update_chroot() {
         --exclude=/data \
         --exclude=/var/lib/flatpak \
         / "${CHROOT_DIR}/" 2>/dev/null || true
+
+    # Re-attach the overlay state (they are distinct filesystems, so the
+    # one-file-system pass above created empty mountpoint dirs for them).
+    log "Copying /var overlay and /etc runtime state into chroot..."
+    if [ -d /var ]; then
+        rsync -aHAX --delete \
+            --exclude=/var/lib/flatpak \
+            --exclude=/var/snap \
+            --exclude=/var/lib/snapd \
+            --exclude=/var/lib/systemd \
+            --exclude=/var/log \
+            --exclude=/var/cache \
+            --exclude=/var/tmp \
+            /var/ "${CHROOT_DIR}/var/" 2>/dev/null || true
+    fi
+
+    # /etc is part of the ro slot image, so the main pass already copied it.
+    # The only parts of /etc that change at runtime are bound from /data
+    # (NetworkManager connections, CUPS printers) - carry that state into the
+    # chroot so the new slot boots with the current wifi/printers.
+    for d in NetworkManager cups; do
+        if [ -d "/etc/${d}" ]; then
+            mkdir -p "${CHROOT_DIR}/etc/${d}"
+            rsync -aHAX "/etc/${d}/" "${CHROOT_DIR}/etc/${d}/" 2>/dev/null || true
+        fi
+    done
 
     # Mount virtual filesystems (mount points are excluded from the copy
     # above, so create them first).

@@ -37,8 +37,9 @@ This will DESTROY all data on the target disk!
 Disk layout:
   Partition 1: EFI System Partition (512MB, FAT32)
   Partition 2: Boot (1GB, ext4)
-  Partition 3: Slot A root (20GB, squashfs container)
-  Partition 4: Slot B root (20GB, squashfs container)
+  Partition 3: Slot A root (20GB, ext4 on fresh install; becomes a raw
+               squashfs + dm-verity image after the first OTA)
+  Partition 4: Slot B root (20GB, same)
   Partition 5: Data (remaining, btrfs - /home, /var/lib/flatpak, etc.)
 EOF
     exit 1
@@ -76,17 +77,19 @@ partition_disk() {
     # Partition 1: EFI (512MB)
     echo "$PASSWORD" | sudo -S sgdisk --new=1:0:+512M --typecode=1:ef00 --change-name=1:"EFI" "$target"
 
-    # Partition 2: Boot (1GB)
-    echo "$PASSWORD" | sudo -S sgdisk --new=2:0:+1G --typecode=2:8300 --change-name=2:"boot" "$target"
+    # Partition 2: Boot (1GB). The sgdisk partition names double as GPT
+    # partlabels (/dev/disk/by-partlabel/...) which the arasaka-ab hook and
+    # boot handler prefer; label-based lookup is the fallback.
+    echo "$PASSWORD" | sudo -S sgdisk --new=2:0:+1G --typecode=2:8300 --change-name=2:"arasaka-boot" "$target"
 
     # Partition 3: Slot A (20GB)
-    echo "$PASSWORD" | sudo -S sgdisk --new=3:0:+20G --typecode=3:8300 --change-name=3:"slot-a" "$target"
+    echo "$PASSWORD" | sudo -S sgdisk --new=3:0:+20G --typecode=3:8300 --change-name=3:"arasaka-slot-a" "$target"
 
     # Partition 4: Slot B (20GB)
-    echo "$PASSWORD" | sudo -S sgdisk --new=4:0:+20G --typecode=4:8300 --change-name=4:"slot-b" "$target"
+    echo "$PASSWORD" | sudo -S sgdisk --new=4:0:+20G --typecode=4:8300 --change-name=4:"arasaka-slot-b" "$target"
 
     # Partition 5: Data (remaining)
-    echo "$PASSWORD" | sudo -S sgdisk --new=5:0:0 --typecode=5:8300 --change-name=5:"data" "$target"
+    echo "$PASSWORD" | sudo -S sgdisk --new=5:0:0 --typecode=5:8300 --change-name=5:"arasaka-data" "$target"
 
     # Get partition naming
     local p1 p2 p3 p4 p5
@@ -104,7 +107,10 @@ partition_disk() {
         p5="${target}5"
     fi
 
-    # Format partitions
+    # Format partitions. The slots stay ext4 on a fresh install; the arasaka-ab
+    # initramfs hook mounts them read-only. The FIRST OTA replaces a slot with
+    # a raw squashfs + dm-verity image (verified at every boot), and the
+    # verity/fallback dispatch in the hook keeps both shapes working.
     log "Formatting partitions..."
     echo "$PASSWORD" | sudo -S mkfs.fat -F32 -n EFI "$p1"
     echo "$PASSWORD" | sudo -S mkfs.ext2 -L arasaka-boot "$p2"
@@ -169,11 +175,6 @@ install_rootfs() {
 
     log "Kernel: ${kname} | Initramfs: ${imgname}"
 
-    # Create the squashfs image
-    log "Creating immutable squashfs image..."
-    sudo mksquashfs "${mnt}/slot-a" "${mnt}/slot-a/arasaka-rootfs.sfs" \
-        -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend
-
     # Install systemd-boot
     log "Installing systemd-boot..."
     sudo mkdir -p "${mnt}/slot-a/boot/ab"
@@ -201,12 +202,15 @@ console-mode auto
 editor no
 LEOF
 
-    # Slot A boot entry (per-slot kernel)
+    # Slot A boot entry (per-slot kernel). The slot root is mounted read-only
+    # by the arasaka-ab initramfs hook; `ro` here is only the degraded fallback
+    # cmdline. PARTLABEL works for both a fresh ext4 slot and a verity-protected
+    # squashfs slot; rauc.slot tells RAUC which slot actually booted.
     sudo tee "${mnt}/boot/loader/entries/arasaka-a.conf" >/dev/null << AEOF
 title   Arasaka (Slot A)
 linux   /vmlinuz-arasaka-a
 initrd  /initramfs-arasaka-a.img
-options root=/dev/disk/by-label/arasaka-slot-a rw rauc.slot=A
+options root=PARTLABEL=arasaka-slot-a ro rauc.slot=A
 AEOF
 
     # Slot B boot entry (per-slot kernel)
@@ -214,46 +218,85 @@ AEOF
 title   Arasaka (Slot B)
 linux   /vmlinuz-arasaka-b
 initrd  /initramfs-arasaka-b.img
-options root=/dev/disk/by-label/arasaka-slot-b rw rauc.slot=B
+options root=PARTLABEL=arasaka-slot-b ro rauc.slot=B
 BEOF
 
-    # Copy kernel and initramfs to /boot with per-slot names (slot A active).
-    # The RAUC boot handler re-extracts these from a freshly-written slot on
-    # every set-primary, keeping them in lockstep with the slot content.
+    # Kernel for the boot loader (per-slot names). The RAUC boot handler
+    # re-extracts kernel+initramfs from a freshly-written slot on every
+    # set-primary, keeping them in lockstep with the slot content.
     sudo cp "${ROOTFS}/boot/${kname}" "${mnt}/boot/vmlinuz-arasaka-a" 2>/dev/null || \
         sudo cp /boot/${kname} "${mnt}/boot/vmlinuz-arasaka-a" 2>/dev/null || \
         sudo cp /boot/vmlinuz-linux "${mnt}/boot/vmlinuz-arasaka-a"
-    sudo cp "${ROOTFS}/boot/${imgname}" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
-        sudo cp /boot/${imgname} "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
-        sudo cp /boot/initramfs-linux.img "${mnt}/boot/initramfs-arasaka-a.img"
     sudo cp "${mnt}/boot/vmlinuz-arasaka-a" "${mnt}/boot/vmlinuz-arasaka-b" 2>/dev/null || true
-    sudo cp "${mnt}/boot/initramfs-arasaka-a.img" "${mnt}/boot/initramfs-arasaka-b.img" 2>/dev/null || true
 
-    # Record the kernel/initramfs baseline for slot A (RAUC state dir lives on
-    # the data partition; arasaka-verify-boot compares these at boot).
-    sha256sum "${mnt}/boot/vmlinuz-arasaka-a" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.kernel.sha256" >/dev/null
-    sha256sum "${mnt}/boot/initramfs-arasaka-a.img" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.initrd.sha256" >/dev/null
-
-    # Set initial active slot
+    # Set initial active slot (markers live on the writable /boot partition)
+    sudo mkdir -p "${mnt}/boot/ab"
     echo "a" | sudo tee "${mnt}/boot/ab/active-slot" >/dev/null
 
-    # Copy squashfs to boot/ab
-    sudo cp "${mnt}/slot-a/arasaka-rootfs.sfs" "${mnt}/boot/ab/arasaka-rootfs.sfs"
-
-    # Create fstab for the installed system
+    # Create fstab for the installed system. /boot stays writable (A/B swap
+    # markers + kernel extraction); /var/tmp is tmpfs because the root slot is
+    # mounted read-only. /etc is part of the ro image (its runtime state -
+    # NetworkManager/cups - is bound from /data by persist-data), and /var
+    # gets overlayfs from /data in the initramfs hook, so no fstab entry is
+    # needed for them.
     sudo tee "${mnt}/slot-a/etc/fstab" >/dev/null << FSTABEOF
 # Arasaka fstab - systemd manages mounts
 /dev/disk/by-label/arasaka-boot    /boot           ext4    defaults,noatime 0 2
 /dev/disk/by-label/arasaka-data    /data           btrfs   defaults,noatime,compress=zstd,subvol=/ 0 1
 /dev/disk/by-label/EFI              /boot/efi       vfat    defaults,noatime 0 2
+tmpfs                               /var/tmp        tmpfs   defaults,noatime,mode=1777 0 0
 FSTABEOF
 
     # Copy install scripts to the installed system
     sudo cp "$(dirname "$0")/scripts/"*.sh "${mnt}/slot-a/usr/local/bin/" 2>/dev/null || true
     sudo chmod +x "${mnt}/slot-a/usr/local/bin/"*.sh 2>/dev/null || true
 
+    # Harden the installed slot exactly like a Calamares install: no sudo/su,
+    # no wheel, no installer, AppArmor guard armed, fresh machine-id (the raw
+    # build rootfs is the live-style image and must be locked down before use).
+    sudo "${mnt}/slot-a/usr/local/bin/arasaka-finalize-install.sh" "${mnt}/slot-a"
+
+    # Regenerate the initramfs inside the installed slot so it carries the
+    # arasaka-verity + arasaka-ab hooks (veritysetup + dm-verity/squashfs
+    # modules) and boots the A/B root slot through dm-verity.
+    log "Regenerating verity-capable initramfs in slot A..."
+    sudo sed -i -E 's/^HOOKS=\(.*\)$/HOOKS=(base udev plymouth autodetect microcode modconf kms keyboard keymap consolefont block arasaka-verity filesystems fsck arasaka-ab)/' \
+        "${mnt}/slot-a/etc/mkinitcpio.conf"
+    if ! grep -q '^MODULES=' "${mnt}/slot-a/etc/mkinitcpio.conf"; then
+        printf 'MODULES=(dm-mod dm-verity squashfs overlay btrfs)\n' | sudo tee -a "${mnt}/slot-a/etc/mkinitcpio.conf" >/dev/null
+    fi
+    for d in proc sys dev run; do
+        sudo mount --bind "/${d}" "${mnt}/slot-a/${d}" 2>/dev/null || true
+    done
+    if sudo chroot "${mnt}/slot-a" /usr/bin/mkinitcpio -P; then
+        log "initramfs regenerated"
+        sudo cp "${mnt}/slot-a/boot/${imgname}" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
+            sudo cp "${mnt}/slot-a/boot/initramfs-linux.img" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || true
+        sudo cp "${mnt}/boot/initramfs-arasaka-a.img" "${mnt}/boot/initramfs-arasaka-b.img" 2>/dev/null || true
+    else
+        log "WARNING: mkinitcpio regeneration failed; keeping prebuilt initramfs" >&2
+        sudo cp "${ROOTFS}/boot/${imgname}" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
+            sudo cp /boot/${imgname} "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
+            sudo cp /boot/initramfs-linux.img "${mnt}/boot/initramfs-arasaka-a.img"
+        sudo cp "${mnt}/boot/initramfs-arasaka-a.img" "${mnt}/boot/initramfs-arasaka-b.img" 2>/dev/null || true
+    fi
+
+    # Per-device machine-id on /boot (the slots are read-only squashfs shared
+    # across devices; the arasaka-ab hook binds this over /etc/machine-id).
+    od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | sudo tee "${mnt}/boot/ab/machine-id" >/dev/null || true
+    sudo chmod 444 "${mnt}/boot/ab/machine-id" 2>/dev/null || true
+
+    # Record the kernel/initramfs baseline for slot A (RAUC state dir lives on
+    # the data partition; arasaka-verify-boot compares these at boot).
+    sha256sum "${mnt}/boot/vmlinuz-arasaka-a" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.kernel.sha256" >/dev/null
+    sha256sum "${mnt}/boot/initramfs-arasaka-a.img" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.initrd.sha256" >/dev/null
+
     # Unmount everything
     log "Unmounting..."
+    sudo umount -rf "${mnt}/slot-a/proc" 2>/dev/null || true
+    sudo umount -rf "${mnt}/slot-a/sys" 2>/dev/null || true
+    sudo umount -rf "${mnt}/slot-a/dev" 2>/dev/null || true
+    sudo umount -rf "${mnt}/slot-a/run" 2>/dev/null || true
     sudo umount -rf "${mnt}/boot-efi" 2>/dev/null || true
     sudo umount -rf "${mnt}/boot" 2>/dev/null || true
     sudo umount -rf "${mnt}/slot-a" 2>/dev/null || true

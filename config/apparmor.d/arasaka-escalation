@@ -1,0 +1,83 @@
+# arasaka-escalation
+#
+# Arasaka immutable-system guard: even ROOT cannot write to protected system
+# paths through the privilege-escalation helpers.
+#
+# This profile attaches to pkexec / sudo / su. On an installed Arasaka system
+# those setuid bits are stripped, so no unprivileged user can invoke them at
+# all. The profile is the second layer: if they are ever run as root (a root
+# shell, a compromised daemon, a stray polkit rule), the confined process is
+# still forbidden from writing /usr, /etc, /lib, /boot, /opt or /bin - the
+# immutable system tree. Mount/unmount are deliberately NOT confined: the
+# update engine and persist-data legitimately call them as root, and they do
+# not write system paths.
+#
+# The live ISO does NOT load this profile: the Calamares installer runs
+# privileged actions through pkexec and must be able to write system paths.
+# build.sh stages it under /usr/share/arasaka/apparmor/ and
+# arasaka-postinstall.sh copies it into /etc/apparmor.d/ on installed systems.
+#
+#include <tunables/global>
+
+profile arasaka-escalation /usr/bin/{pkexec,sudo,su} flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  capability setuid,
+  capability setgid,
+  capability chown,
+  capability dac_override,
+  capability dac_read_search,
+
+  # Read-only access to the whole tree (helpers may read system config and
+  # libraries; /etc/passwd, pam configs, CA stores, etc.).
+  / r,
+  /** r,
+  /** m,
+
+  # Writable scratch: transient + user state only.
+  /tmp/** rw,
+  /var/tmp/** rw,
+  /run/** rw,
+  /var/run/** rw,
+  /dev/** rwk,
+  /proc/** rw,
+  /sys/** rw,
+  /data/** rw,
+  owner /var/log/** rw,
+
+  # Explicit denies: no writes, creates, deletes or locks under the immutable
+  # system paths, even for root. (Everything else is default-deny already;
+  # these make the intent explicit and override any future broad allow.)
+  deny /etc/** w,
+  deny /etc/** k,
+  deny /usr/** w,
+  deny /usr/** k,
+  deny /lib/** w,
+  deny /lib/** k,
+  deny /lib64/** w,
+  deny /lib64/** k,
+  deny /bin/** w,
+  deny /bin/** k,
+  deny /sbin/** w,
+  deny /sbin/** k,
+  deny /opt/** w,
+  deny /opt/** k,
+  deny /boot/** w,
+  deny /boot/** k,
+  deny /var/lib/** w,
+  deny /var/lib/** k,
+  deny /home/** w,
+
+  # Children (shells spawned by su/sudo) inherit this confinement, so they
+  # cannot write system paths either.
+  /usr/bin/*bash rix,
+  /usr/bin/*sh rix,
+  /usr/bin/dash rix,
+  /usr/bin/zsh rix,
+  /usr/bin/env rix,
+  /bin/bash rix,
+  /bin/sh rix,
+  /usr/bin/sh rix,
+  /usr/bin/busybox rix,
+}

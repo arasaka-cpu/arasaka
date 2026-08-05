@@ -1,0 +1,15 @@
+#!/bin/sh
+# arasaka-verity - install hook for mkinitcpio.
+# Ships veritysetup (cryptsetup) into the initramfs so the arasaka-ab hook can
+# open the dm-verity root slot in the initramfs before the root is mounted.
+
+build() {
+    add_runscript
+    add_binary /usr/bin/veritysetup
+}
+
+help() {
+    cat << EOF
+  arasaka-verity  - ships veritysetup for opening the dm-verity root slot.
+EOF
+}

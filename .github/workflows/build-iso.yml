@@ -416,7 +416,7 @@ jobs:
             exit 1
           fi
           python3 - "$BUNDLE" "$POINTER" <<'PY'
-          import hashlib, json, os, subprocess, sys, time
+          import hashlib, json, os, subprocess, sys, time, urllib.parse
 
           BUNDLE, POINTER = sys.argv[1], sys.argv[2]
           KEY_ID = os.environ["B2_UPDATES_APPLICATION_KEY_ID"]
@@ -458,11 +458,12 @@ jobs:
               raise SystemExit("cannot find apiUrl: " + json.dumps(auth)[:400])
           print(f"authorized: api={api_url}")
 
-          buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_list_buckets",
-              "--data-binary", json.dumps({"accountId": auth.get("accountId", ""),
-                                           "bucketName": BUCKET})]))
-          bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
+          # b2_get_bucket_by_name: resolves a bucket without listing the
+          # account, which the bucket-restricted updates key cannot do (the
+          # previous b2_list_buckets call returned 401 for it).
+          bucket = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_get_bucket_by_name?bucketName={urllib.parse.quote(BUCKET)}"]))
+          bucket_id = bucket["bucketId"]
           print(f"bucket {BUCKET} id {bucket_id}")
 
           up = curl_json(["-H", f"Authorization: {token}",

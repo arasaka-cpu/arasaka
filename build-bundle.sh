@@ -2,13 +2,20 @@
 # build-bundle.sh - Arasaka signed OTA bundle builder
 #
 # Builds the RAUC update bundle from the rootfs produced by build.sh:
-#   1. packs the rootfs into a raw ext4 slot image (label gets fixed per-slot
-#      by an in-bundle post-install hook on the device),
-#   2. regenerates the initramfs inside the image so it includes the Arasaka
-#      A/B hook (mkinitcpio needs a working chroot, hence bind mounts),
+#   1. makes a hardened copy of the rootfs (same locked-down shape a fresh
+#      install gets: no sudo/su, no installer, AppArmor guard armed) and
+#      regenerates its initramfs so it includes the Arasaka A/B + dm-verity
+#      hooks,
+#   2. packs that rootfs into a raw squashfs slot image and appends a dm-verity
+#      hash tree to the same file (the hash offset / root hash are baked into
+#      the in-bundle post-install hook),
 #   3. writes a verity-format RAUC bundle signed with the OTA signing key,
 #   4. verifies the bundle against the staged CA (the same keyring the device
 #      trusts).
+#
+# On the device, the bundle's post-install hook writes /boot/ab/verity-<slot>.conf
+# (root hash + hash offset) and a per-device /boot/ab/machine-id; the arasaka-ab
+# initramfs hook opens the slot through dm-verity on every boot.
 #
 # Run AFTER ./build.sh on the same host/chroot. Signing material is supplied
 # via the OTA_SIGNING_KEY / OTA_SIGNING_CERT environment variables pointing at
@@ -18,9 +25,9 @@ set -euo pipefail
 NAME="arasaka"
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)/build"
 ROOTFS="${BUILD_DIR}/rootfs"
-IMG="${BUILD_DIR}/arasaka-rootfs.ext4"
+HARDENED="${BUILD_DIR}/bundle-rootfs"
+IMG="${BUILD_DIR}/rootfs.img"
 BUNDLE_DIR="${BUILD_DIR}/bundle"
-IMG_MNT="${BUILD_DIR}/bundle-img"
 
 # Sudo password handling mirrors build.sh.
 if [ -n "${ARASAKA_SUDO_PASSWORD:-}" ]; then
@@ -40,7 +47,8 @@ die() { log "FATAL: $*"; exit 1; }
 
 run() { echo "$PASSWORD" | sudo -S "$@" 2>/dev/null; }
 run_quiet() { echo "$PASSWORD" | sudo -S "$@" >/dev/null 2>&1; }
-# Like run() but keeps stderr (for rauc where we need failure output).
+# Like run() but keeps stderr + stdout (for rauc / veritysetup where we need
+# the real output).
 run_verbose() { echo "$PASSWORD" | sudo -S "$@"; }
 
 SIGN_KEY="${OTA_SIGNING_KEY:-}"
@@ -51,6 +59,7 @@ check() {
     [ -f "${ROOTFS}/boot/vmlinuz-linux" ] || die "no kernel in rootfs (/boot/vmlinuz-linux)"
     command -v rauc >/dev/null 2>&1 || die "rauc not installed on this host"
     command -v mksquashfs >/dev/null 2>&1 || die "mksquashfs not installed (squashfs-tools)"
+    command -v veritysetup >/dev/null 2>&1 || die "veritysetup not installed (cryptsetup)"
     [ -n "$SIGN_KEY" ] && [ -f "$SIGN_KEY" ] || die "OTA_SIGNING_KEY must point at the signing private key PEM"
     [ -n "$SIGN_CERT" ] && [ -f "$SIGN_CERT" ] || die "OTA_SIGNING_CERT must point at the signing certificate PEM"
     [ -f "$(dirname "$0")/config/rauc/ca.crt" ] || die "staged CA missing: config/rauc/ca.crt"
@@ -66,72 +75,121 @@ version_of_rootfs() {
     esac
 }
 
-build_slot_image() {
-    log "Building ext4 slot image..."
-    local used_mb size_mb
-    # du must read the whole rootfs, parts of which are root-only; run it as
-    # root so the image is sized from the real, complete usage.
-    used_mb=$(run du -smx "${ROOTFS}" | cut -f1)
-    size_mb=$(( (used_mb * 14 / 10) + 1024 ))   # +40% headroom + 1 GiB floor
-    rm -f "${IMG}"
-    run_quiet truncate -s "${size_mb}M" "${IMG}"
-    run_quiet mkfs.ext4 -q -F -L arasaka-slot-rootfs "${IMG}"
-    run_quiet mkdir -p "${IMG_MNT}"
-    run mount -o loop "${IMG}" "${IMG_MNT}"
-    log "Copying rootfs into image (${size_mb} MB)..."
+write_canonical_fstab() {
+    # The installed system mounts /boot and /boot/efi by stable filesystem
+    # label (set by the partitioner), /data by label, and /var/tmp as tmpfs
+    # (the root slot is read-only). UUIDs would break on OTA, since every
+    # bundle replaces the rootfs that carries fstab.
+    cat > "${HARDENED}/etc/fstab" << 'FSTABEOF'
+# Arasaka fstab - systemd manages mounts
+/dev/disk/by-label/arasaka-boot    /boot           ext4    defaults,noatime 0 2
+/dev/disk/by-label/arasaka-data    /data           btrfs   defaults,noatime,compress=zstd,subvol=/ 0 1
+/dev/disk/by-label/EFI              /boot/efi       vfat    defaults,noatime 0 2
+tmpfs                               /var/tmp        tmpfs   defaults,noatime,mode=1777 0 0
+FSTABEOF
+    log "Wrote canonical fstab (label-based, OTA-stable)"
+}
+
+prepare_hardened_rootfs() {
+    # The slot rootfs must be the installed-system shape (no sudo/installer/
+    # live polkit rules), identical to a fresh install. build.sh's ROOTFS is
+    # the live-style image and MUST keep sudo for the installer, so copy it and
+    # harden the copy. Also regenerate the initramfs inside the copy so the
+    # installed slot boots with the A/B + dm-verity hooks.
+    log "Preparing hardened rootfs copy (installer/sudo stripped)..."
+    rm -rf "${HARDENED}"
+    run_quiet mkdir -p "${HARDENED}"
     run_quiet rsync -aHAX --one-file-system \
         --exclude '/dev/*' --exclude '/proc/*' --exclude '/sys/*' --exclude '/run/*' \
         --exclude '/tmp/*' --exclude '/mnt/*' \
-        "${ROOTFS}/" "${IMG_MNT}/"
-}
+        "${ROOTFS}/" "${HARDENED}/"
 
-rebuild_initramfs() {
-    # Regenerate the initramfs inside the image so it includes the Arasaka
-    # A/B hook + drop-in (the strap-time initramfs predates that config).
-    log "Regenerating initramfs inside image..."
-    run_quiet mkdir -p "${IMG_MNT}"/{proc,sys,dev,run}
-    run mount --bind /proc "${IMG_MNT}/proc"
-    run mount --bind /sys  "${IMG_MNT}/sys"
-    run mount --bind /dev  "${IMG_MNT}/dev"
-    run mount --bind /run  "${IMG_MNT}/run"
-    if run arch-chroot "${IMG_MNT}" /usr/bin/bash -c 'mkinitcpio -P' >/dev/null 2>&1; then
+    write_canonical_fstab
+
+    log "Hardening image (no sudo/wheel/installer)..."
+    if ! run arch-chroot "${HARDENED}" /bin/bash \
+        /usr/local/bin/arasaka-finalize-install.sh /; then
+        die "finalize-install failed inside hardened rootfs"
+    fi
+
+    log "Regenerating initramfs inside hardened rootfs (A/B + dm-verity hooks)..."
+    run_quiet mkdir -p "${HARDENED}"/{proc,sys,dev,run}
+    run mount --bind /proc "${HARDENED}/proc"
+    run mount --bind /sys  "${HARDENED}/sys"
+    run mount --bind /dev  "${HARDENED}/dev"
+    run mount --bind /run  "${HARDENED}/run"
+    if run arch-chroot "${HARDENED}" /usr/bin/bash -c 'mkinitcpio -P' >/dev/null 2>&1; then
         log "initramfs regenerated"
     else
-        if [ -f "${IMG_MNT}/boot/initramfs-linux.img" ]; then
-            log "WARNING: mkinitcpio failed inside image; keeping existing initramfs (may lack A/B hook)"
-        else
-            die "mkinitcpio failed and no initramfs exists in the image"
-        fi
+        die "mkinitcpio failed inside hardened rootfs"
     fi
-    run umount -lf "${IMG_MNT}/run" 2>/dev/null || true
-    run umount -lf "${IMG_MNT}/dev" 2>/dev/null || true
-    run umount -lf "${IMG_MNT}/sys" 2>/dev/null || true
-    run umount -lf "${IMG_MNT}/proc" 2>/dev/null || true
+    run umount -lf "${HARDENED}/run" 2>/dev/null || true
+    run umount -lf "${HARDENED}/dev" 2>/dev/null || true
+    run umount -lf "${HARDENED}/sys" 2>/dev/null || true
+    run umount -lf "${HARDENED}/proc" 2>/dev/null || true
+}
+
+build_rootfs_img() {
+    # Pack the hardened rootfs into a squashfs image and append a dm-verity
+    # hash tree to the SAME file (--hash-offset). The slot is a raw container;
+    # the hash tree rides inside it. The root hash + offset are baked into the
+    # bundle hook below and written to /boot on the device.
+    log "Building squashfs + dm-verity slot image..."
+    rm -f "${IMG}"
+    run_verbose mksquashfs "${HARDENED}" "${IMG}" \
+        -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend
+
+    local img_size off
+    img_size=$(run stat -c %s "${IMG}")
+    # Hash tree must start on a block boundary: round the image size up to the
+    # next 4096 block so data and hash areas never overlap.
+    off=$(( (img_size + 4095) / 4096 * 4096 ))
+    ROOT_HASH=$(run_verbose veritysetup format \
+        --format=1 \
+        --data-block-size=4096 --hash-block-size=4096 \
+        --hash-offset="${off}" \
+        "${IMG}" "${IMG}" | sed -n 's/^Root hash:[[:space:]]*//p')
+    [ -n "${ROOT_HASH}" ] || die "veritysetup format failed - no root hash captured"
+    HASH_OFFSET="${off}"
+    log "Verity root hash: ${ROOT_HASH}"
+    log "Hash offset:      ${HASH_OFFSET}"
 }
 
 write_bundle() {
     log "Writing bundle directory + manifest..."
-    # Recreate the bundle dir as the invoking user (a previous run may have
-    # left it root-owned from a sudo'ed creation). Everything below writes to
-    # it as the user; only rootfs.ext4 and the rauc bundle go through sudo.
     run_quiet rm -rf "${BUNDLE_DIR}"
     mkdir -p "${BUNDLE_DIR}"
 
-    # Per-slot post-install hook: restore the slot partition label. The bundle
-    # image is written to either slot, so the label must be fixed after install
-    # for the by-label device paths in system.conf (and the boot backend) to
-    # keep working.
-    cat > "${BUNDLE_DIR}/hook.sh" << 'HOOKEOF'
+    # Per-slot post-install hook: writes the slot's dm-verity conf (consumed by
+    # the arasaka-ab initramfs hook) and a per-device machine-id to /boot. The
+    # root hash / offset are baked in at build time - they match rootfs.img.
+    cat > "${BUNDLE_DIR}/hook.sh" << HOOKEOF
 #!/bin/sh
-case "$1" in
+# Generated per-bundle: writes the slot's dm-verity conf + per-device
+# machine-id on install. Values are baked at bundle build time.
+ROOT_HASH="${ROOT_HASH}"
+HASH_OFFSET="${HASH_OFFSET}"
+
+case "\$1" in
     slot-post-install)
-        case "$RAUC_SLOT_NAME" in
-            rootfs.0) label=arasaka-slot-a ;;
-            rootfs.1) label=arasaka-slot-b ;;
-            *) echo "unknown slot: $RAUC_SLOT_NAME" >&2; exit 1 ;;
+        case "\$RAUC_SLOT_NAME" in
+            rootfs.0) slot=a ;;
+            rootfs.1) slot=b ;;
+            *) echo "unknown slot: \$RAUC_SLOT_NAME" >&2; exit 1 ;;
         esac
-        echo "relabeling $RAUC_SLOT_DEVICE -> $label"
-        e2label "$RAUC_SLOT_DEVICE" "$label"
+        echo "writing /boot/ab/verity-\${slot}.conf for slot \${slot}"
+        # /boot is the shared writable partition; the arasaka-ab initramfs hook
+        # reads this to open the slot via dm-verity on the next boot.
+        mkdir -p /boot/ab
+        printf 'root_hash=%s\nhash_offset=%s\n' "\$ROOT_HASH" "\$HASH_OFFSET" \\
+            > "/boot/ab/verity-\${slot}.conf"
+        # Per-device machine-id: create once, never overwrite (systemd identity
+        # must be stable across updates).
+        if [ ! -s /boot/ab/machine-id ]; then
+            od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > /boot/ab/machine-id 2>/dev/null || true
+            chmod 444 /boot/ab/machine-id 2>/dev/null || true
+        fi
+        sync
         ;;
     *)
         exit 1
@@ -153,12 +211,12 @@ format=verity
 filename=hook.sh
 
 [image.rootfs]
-filename=rootfs.ext4
+filename=rootfs.img
 hooks=post-install
 MANIFESTEOF
 
     # The image goes into the bundle directory for rauc bundle to pick up.
-    run_quiet cp "${IMG}" "${BUNDLE_DIR}/rootfs.ext4"
+    run_quiet cp "${IMG}" "${BUNDLE_DIR}/rootfs.img"
 }
 
 build_and_verify_bundle() {
@@ -182,10 +240,9 @@ main() {
     VERSION="$(version_of_rootfs)"
     log "Version: ${VERSION}"
 
-    build_slot_image
-    rebuild_initramfs
-    run_quiet umount -lf "${IMG_MNT}" 2>/dev/null || true
-    run_quiet rm -rf "${IMG_MNT}"
+    prepare_hardened_rootfs
+    build_rootfs_img
+    run_quiet rm -rf "${HARDENED}"
 
     write_bundle
     build_and_verify_bundle

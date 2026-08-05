@@ -12,6 +12,13 @@ DATA_MNT="/data"
 # into the running root so user state survives OTA slot swaps.
 SUBVOLS=(@flatpak @snap @snapd @systemd @log @cache @home)
 BINDS=(/var/lib/flatpak /var/snap /var/lib/snapd /var/lib/systemd /var/log /var/cache /home)
+# Runtime /etc state. /etc itself is part of the read-only slot image, so the
+# few places a desktop actually writes configuration (Wi-Fi connections via
+# NetworkManager, printers via CUPS) are seeded once from the baked image and
+# then bound from /data. machine-id is not bound here: the squashfs slots are
+# read-only and shared, so the per-device id lives on /boot/ab/machine-id and
+# is bound over /etc/machine-id by the arasaka-ab initramfs hook.
+ETC_STATE=(NetworkManager cups)
 
 log() { echo "[arasaka-persist] $*"; }
 
@@ -48,11 +55,29 @@ bind_state() {
     done
 }
 
+bind_etc_state() {
+    local d
+    for d in "${ETC_STATE[@]}"; do
+        # First boot: the /data copy is empty, so seed it from the baked ro
+        # image before binding (otherwise the baked defaults disappear).
+        if [ -d "/etc/${d}" ] && [ -z "$(ls -A "${DATA_MNT}/etc/${d}" 2>/dev/null)" ]; then
+            mkdir -p "${DATA_MNT}/etc/${d}"
+            cp -a "/etc/${d}/." "${DATA_MNT}/etc/${d}/" 2>/dev/null || true
+        fi
+        mkdir -p "${DATA_MNT}/etc/${d}" "/etc/${d}"
+        if ! mountpoint -q "/etc/${d}"; then
+            mount --bind "${DATA_MNT}/etc/${d}" "/etc/${d}"
+            log "Bound ${DATA_MNT}/etc/${d} -> /etc/${d}"
+        fi
+    done
+}
+
 main() {
     log "Ensuring persistent state on /data..."
     if mount_data; then
         ensure_subvols
         bind_state
+        bind_etc_state
     fi
     log "Persistent state ready"
 }

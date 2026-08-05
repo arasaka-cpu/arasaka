@@ -7,6 +7,9 @@ RequiresMountsFor=/data
 Type=oneshot
 ExecStart=/usr/bin/rauc status mark-good
 RemainAfterExit=yes
+ProtectSystem=strict
+ReadWritePaths=/data
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
