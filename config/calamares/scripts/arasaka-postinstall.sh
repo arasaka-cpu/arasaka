@@ -24,6 +24,19 @@ echo "[arasaka-postinstall] Target root: ${TARGET}"
 mkdir -p "${TARGET}/boot/ab"
 echo "a" > "${TARGET}/boot/ab/active-slot"
 
+# Per-device machine-id. The slots are read-only squashfs images (shared by
+# every device), so the id must live on the writable /boot partition; the
+# arasaka-ab initramfs hook binds it over /etc/machine-id at boot. Calamares
+# already generated the target id - reuse it so the id is stable; fall back to
+# generating one here if the target has none yet.
+if [ -s "${TARGET}/etc/machine-id" ]; then
+    cp -a "${TARGET}/etc/machine-id" "${TARGET}/boot/ab/machine-id" 2>/dev/null || true
+else
+    od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' > "${TARGET}/boot/ab/machine-id" 2>/dev/null || true
+fi
+chmod 444 "${TARGET}/boot/ab/machine-id" 2>/dev/null || true
+echo "[arasaka-postinstall] Per-device machine-id on /boot/ab/machine-id"
+
 # The root mount is handled by the arasaka-ab initramfs hook (by slot label);
 # fstab must NOT reference a specific slot's root device or systemd would try
 # to remount it over whatever slot is actually active. Strip the "/" entry.
@@ -91,11 +104,17 @@ echo "[arasaka-postinstall] Active slot recorded as 'a'"
 # hooks). Switch it to the busybox-style initramfs so the arasaka-ab hook can
 # override the root mount handler (the systemd initramfs hook cannot run
 # run_hook() mount_handler overrides), then regenerate it for a plain disk
-# install so the installed system boots from the active A/B slot.
-echo "[arasaka-postinstall] Forcing busybox initramfs (arasaka-ab hook + plymouth)..."
+# install so the installed system boots from the active A/B slot. The A/B
+# root slots are squashfs images opened through dm-verity, so veritysetup and
+# the dm-verity/squashfs modules must be in the initramfs (arasaka-verity
+# hook + MODULES).
+echo "[arasaka-postinstall] Forcing busybox initramfs (arasaka-ab + arasaka-verity + plymouth)..."
 if [ -f "${TARGET}/etc/mkinitcpio.conf" ]; then
-    sed -i -E 's/^HOOKS=\(.*\)$/HOOKS=(base udev plymouth autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck arasaka-ab)/' \
+    sed -i -E 's/^HOOKS=\(.*\)$/HOOKS=(base udev plymouth autodetect microcode modconf kms keyboard keymap consolefont block arasaka-verity filesystems fsck arasaka-ab)/' \
         "${TARGET}/etc/mkinitcpio.conf"
+    if ! grep -q '^MODULES=' "${TARGET}/etc/mkinitcpio.conf"; then
+        printf 'MODULES=(dm-mod dm-verity squashfs overlay btrfs)\n' >> "${TARGET}/etc/mkinitcpio.conf"
+    fi
 fi
 echo "[arasaka-postinstall] Regenerating initramfs in target..."
 if chroot "${TARGET}" /usr/bin/mkinitcpio -P; then
@@ -103,3 +122,51 @@ if chroot "${TARGET}" /usr/bin/mkinitcpio -P; then
 else
     echo "[arasaka-postinstall] WARNING: mkinitcpio regeneration failed" >&2
 fi
+
+# A/B loader entries for systemd-boot. The arasaka-ab hook selects the slot by
+# marker/partlabel and ignores root= (it overrides the mount handler), so the
+# root= here is only a degraded fallback - PARTLABEL works for both a fresh
+# ext4 slot and a verity-protected squashfs slot. rauc.slot tells RAUC which
+# slot actually booted (kernel hash recording + mark-good). The loader dir can
+# live on the ESP (/boot/efi) or the boot partition (/boot) depending on how
+# the Calamares bootloader module laid things out - write both so systemd-boot
+# finds the A/B entries either way.
+for LD in "${TARGET}/boot/loader" "${TARGET}/boot/efi/loader"; do
+    ENTRIES="${LD}/entries"
+    if [ ! -d "${LD}" ]; then
+        continue
+    fi
+    mkdir -p "${ENTRIES}"
+    write_ab_entry() {
+        # $1 = slot letter, $2 = title
+        cat > "${ENTRIES}/arasaka-$1.conf" << ENTRYEOF
+title   Arasaka (Slot ${1^^})
+linux   /vmlinuz-arasaka-$1
+initrd  /initramfs-arasaka-$1.img
+options root=PARTLABEL=arasaka-slot-$1 ro rauc.slot=${1^^}
+ENTRYEOF
+        echo "[arasaka-postinstall] Wrote loader entry ${LD}/entries/arasaka-$1.conf"
+    }
+    write_ab_entry a
+    write_ab_entry b
+
+    if [ -f "${LD}/loader.conf" ]; then
+        sed -i 's/^default .*/default arasaka-a.conf/' "${LD}/loader.conf"
+        echo "[arasaka-postinstall] ${LD}/loader.conf default -> arasaka-a.conf"
+    fi
+
+    # Stage the per-slot kernel/initramfs copies the entries reference. The
+    # RAUC boot handler re-extracts these from a freshly-written slot on every
+    # set-primary.
+    KNAME=$(find "${TARGET}/boot" -maxdepth 1 -name 'vmlinuz*' -printf '%f\n' 2>/dev/null | sort -V | tail -1 || echo vmlinuz-linux)
+    IMGNAME="initramfs${KNAME#vmlinuz}.img"
+    [ -f "${TARGET}/boot/${IMGNAME}" ] || IMGNAME="initramfs-linux.img"
+    for s in a b; do
+        if [ -f "${TARGET}/boot/${KNAME}" ]; then
+            cp -a "${TARGET}/boot/${KNAME}" "${TARGET}/boot/vmlinuz-arasaka-${s}" 2>/dev/null || true
+        fi
+        if [ -f "${TARGET}/boot/${IMGNAME}" ]; then
+            cp -a "${TARGET}/boot/${IMGNAME}" "${TARGET}/boot/initramfs-arasaka-${s}.img" 2>/dev/null || true
+        fi
+    done
+done

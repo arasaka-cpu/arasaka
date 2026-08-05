@@ -53,7 +53,7 @@ check_host() {
 
 ensure_deps() {
     local deps=(pacman arch-install-scripts squashfs-tools dosfstools parted
-                efibootmgr btrfs-progs e2fsprogs)
+                efibootmgr btrfs-progs e2fsprogs cryptsetup)
     local missing=()
     for d in "${deps[@]}"; do
         command -v "$d" &>/dev/null || missing+=("$d")
@@ -122,6 +122,7 @@ strap() {
         fuse3 \
         rauc \
         desync \
+        cryptsetup \
         cups \
         foomatic-db \
         ghostscript \
@@ -1416,13 +1417,9 @@ copy_services() {
         run_quiet chmod +x "${bin_dir}/$(basename "$f")"
     done
 
-    if [ -f "$(dirname "$0")/systemd/arasaka-mount-generator" ]; then
-        run_quiet cp "$(dirname "$0")/systemd/arasaka-mount-generator" "${gen_dir}/"
-        run_quiet chmod +x "${gen_dir}/arasaka-mount-generator"
-    fi
-
     # Install the Arasaka A/B initramfs hook (mount_handler override with
-    # slot rollback) + the drop-in that selects the busybox-style initramfs.
+    # slot rollback) + the dm-verity hook + the drop-in that selects the
+    # busybox-style initramfs.
     if [ -d "$(dirname "$0")/initcpio" ]; then
         run_quiet mkdir -p "${ROOTFS}/etc/initcpio/hooks" \
                          "${ROOTFS}/etc/initcpio/install" \
@@ -1457,7 +1454,6 @@ copy_services() {
     run arch-chroot "${ROOTFS}" /bin/bash -c '
         systemctl enable arasaka-update.timer 2>/dev/null || true
         systemctl enable arasaka-reboot-after-update.timer 2>/dev/null || true
-        systemctl enable arasaka-slot-mount 2>/dev/null || true
         systemctl enable arasaka-boot-succeeded.service 2>/dev/null || true
         systemctl enable arasaka-persist-data.service 2>/dev/null || true
         systemctl enable arasaka-verify-boot.service 2>/dev/null || true

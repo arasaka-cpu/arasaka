@@ -1,5 +1,5 @@
 [Unit]
-Description=Arasaka A/B System Update
+Description=Arasaka Signed OTA Update
 Documentation=https://github.com/arasaka
 After=network-online.target systemd-resolved.service rauc.service
 Wants=network-online.target
@@ -9,7 +9,7 @@ ConditionPathExists=!/var/lock/arasaka-update.lock
 Type=oneshot
 ExecStartPre=/usr/bin/mkdir -p /var/lock
 ExecStartPre=/usr/bin/touch /var/lock/arasaka-update.lock
-ExecStart=/usr/local/bin/arasaka-update.sh
+ExecStart=/usr/local/bin/arasaka-ota-update.sh
 ExecStartPost=/usr/bin/rm -f /var/lock/arasaka-update.lock
 TimeoutStartSec=3600
 Nice=10

@@ -1,0 +1,18 @@
+#!/bin/sh
+# arasaka-verity - load the dm-verity storage stack before the root slot opens.
+#
+# Runs right before the `filesystems` hook. The A/B root slot is a raw squashfs
+# image with an appended dm-verity hash tree, opened by the arasaka-ab mount
+# handler below; the device-mapper / squashfs modules must be present and
+# loaded by then. They are also declared in MODULES= of the arasaka-ab.conf
+# drop-in so autodetect can never leave them out of the initramfs.
+
+run_hook() {
+    modprobe dm-mod 2>/dev/null || true
+    modprobe dm-verity 2>/dev/null || true
+    modprobe squashfs 2>/dev/null || true
+    # The mount handler also needs overlayfs (writable /var on /data) and btrfs
+    # (the data partition); load them here so the whole storage stack is ready.
+    modprobe overlay 2>/dev/null || true
+    modprobe btrfs 2>/dev/null || true
+}

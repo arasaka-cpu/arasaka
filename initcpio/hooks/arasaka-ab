@@ -1,38 +1,49 @@
 #!/bin/sh
 # arasaka-ab - Arasaka A/B slot root selection with rollback protection.
 #
-# Replaces the default initramfs root mount: mounts the boot partition,
-# reads the active A/B slot marker, and mounts the active slot's root
-# partition (raw ext4, by label) as the real root READ-ONLY. If a slot
-# swap is pending but the new slot's boot was not confirmed (swap-tried
-# marker left by an earlier, unsuccessful boot) the previous slot is
-# restored first - i.e. a slot is only ever adopted after it boots
-# successfully.
+# Replaces the default initramfs root mount: mounts the boot partition, reads
+# the active A/B slot marker, and mounts the active slot as the real root
+# READ-ONLY. If a slot swap is pending but the new slot's boot was not
+# confirmed (swap-tried marker left by an earlier, unsuccessful boot) the
+# previous slot is restored first - i.e. a slot is only ever adopted after it
+# boots successfully.
 #
-# Immutability: the slot root is mounted ro and stays ro for the whole
-# boot. The ONLY writable state on the running system lives on the btrfs
-# data partition (/data): /var gets an overlayfs mount on top of the ro
-# slot (upper dir on /data), /etc stays part of the read-only image (only
-# its runtime config state - NetworkManager, cups, machine-id - is bound
-# from /data by the persist-data service), and the persist-data service
-# binds the @home/@log/... subvolumes in at runtime. /tmp and /run are
-# tmpfs (systemd), so every path a desktop actually writes is covered
-# while /usr, /lib, /bin, /etc and /boot stay read-only.
+# Slot root image:
+#   - After an OTA update the slot partition holds a raw squashfs image with an
+#     appended dm-verity hash tree. The slot is opened with veritysetup and
+#     mounted from /dev/mapper; the root hash + hash offset come from
+#     /boot/ab/verity-<slot>.conf (written by the bundle's post-install hook).
+#     dm-verity verifies every block the kernel reads, so a tampered or
+#     corrupt slot fails to open/mount and the rollback path takes over.
+#   - On a fresh install (no verity conf yet) the slot is a plain ext4
+#     partition and is mounted directly read-only.
 #
-# On a fresh install (no pending swap) this behaves like the stock
-# mkinitcpio mount handler, using the kernel cmdline root= as a fallback.
+# Immutability: the slot root is mounted ro and stays ro for the whole boot.
+# The ONLY writable state on the running system lives on the btrfs data
+# partition (/data): /var gets an overlayfs mount on top of the ro slot (upper
+# dir on /data), the per-device machine-id is bound from /boot/ab/machine-id
+# (the squashfs slots are read-only and shared by every device running the
+# same bundle, so systemd's id cannot live on the slot), and the persist-data
+# service binds @home/@log/... plus the /etc runtime state (NetworkManager,
+# cups) in at runtime. /tmp and /run are tmpfs (systemd), so every path a
+# desktop actually writes is covered while /usr, /lib, /bin, /etc and /boot
+# stay read-only.
+#
+# The boot partition stays mounted and is moved onto the new root's /boot so
+# it survives switch_root: the running system needs it for the swap markers
+# (arasaka-boot-succeeded.service), the OTA engine and the RAUC boot handler.
 
 run_hook() {
     mount_handler=arasaka_ab_mount
 }
 
 find_boot_partition() {
-    if [ -b /dev/disk/by-label/arasaka-boot ]; then
-        echo /dev/disk/by-label/arasaka-boot
-        return 0
-    fi
     if [ -b /dev/disk/by-partlabel/arasaka-boot ]; then
         echo /dev/disk/by-partlabel/arasaka-boot
+        return 0
+    fi
+    if [ -b /dev/disk/by-label/arasaka-boot ]; then
+        echo /dev/disk/by-label/arasaka-boot
         return 0
     fi
     return 1
@@ -40,40 +51,143 @@ find_boot_partition() {
 
 find_slot_partition() {
     # $1 = slot letter (a|b)
-    if [ -b "/dev/disk/by-label/arasaka-slot-$1" ]; then
-        echo "/dev/disk/by-label/arasaka-slot-$1"
-        return 0
-    fi
     if [ -b "/dev/disk/by-partlabel/arasaka-slot-$1" ]; then
         echo "/dev/disk/by-partlabel/arasaka-slot-$1"
+        return 0
+    fi
+    if [ -b "/dev/disk/by-label/arasaka-slot-$1" ]; then
+        echo "/dev/disk/by-label/arasaka-slot-$1"
         return 0
     fi
     return 1
 }
 
 find_data_partition() {
+    if [ -b /dev/disk/by-partlabel/arasaka-data ]; then
+        echo /dev/disk/by-partlabel/arasaka-data
+        return 0
+    fi
     if [ -b /dev/disk/by-label/arasaka-data ]; then
         echo /dev/disk/by-label/arasaka-data
         return 0
     fi
-    if [ -b /dev/disk/by-partlabel/arasaka-data ]; then
-        echo /dev/disk/by-partlabel/arasaka-data
+    return 1
+}
+
+read_verity_conf() {
+    # $1 = slot letter. Prints "ROOT_HASH HASH_OFFSET" for the slot's verity
+    # image, or fails if the conf is missing/malformed. The conf is written to
+    # /boot by the OTA bundle's post-install hook; on a fresh install (ext4
+    # slot) it does not exist and the ext4 path is used instead.
+    local slot="$1" conf roothash hash_off
+    conf="${abmnt}/ab/verity-${slot}.conf"
+    [ -f "$conf" ] || return 1
+    roothash="$(sed -n 's/^root_hash=//p' "$conf")"
+    hash_off="$(sed -n 's/^hash_offset=//p' "$conf")"
+    case "$roothash" in
+        [0-9a-f][0-9a-f]*) ;;
+        *) return 1 ;;
+    esac
+    case "$hash_off" in
+        '') return 1 ;;
+        *[!0-9]*) return 1 ;;
+    esac
+    echo "$roothash $hash_off"
+}
+
+mount_slot_verity() {
+    # $1 = slot letter, $2 = newroot. Opens the slot through dm-verity and
+    # mounts the verified squashfs image read-only.
+    local slot="$1" newroot="$2" rootdev vconf roothash hash_off
+    rootdev="$(find_slot_partition "$slot")" || return 1
+    [ -b "$rootdev" ] || return 1
+    vconf="$(read_verity_conf "$slot")" || return 1
+    set -- $vconf
+    roothash="$1"
+    hash_off="$2"
+
+    # Failure to open means the root hash does not match the data (tampering
+    # or corruption) - veritysetup refuses to map it. Never fall back to a
+    # plain (unverified) mount here; the rollback path handles the failure.
+    if ! veritysetup open --hash-offset="$hash_off" "$rootdev" arasaka-vroot "$rootdev" "$roothash" 2>/dev/null; then
+        msg "Arasaka A/B: dm-verity open FAILED for slot $slot (corrupt or tampered image?)"
+        return 1
+    fi
+    # dm-verity emits device-mapper uevents; make sure /dev/mapper nodes exist.
+    udevadm settle 2>/dev/null || true
+
+    mkdir -p "$newroot"
+    if ! mount -t squashfs -o ro /dev/mapper/arasaka-vroot "$newroot" 2>/dev/null; then
+        msg "Arasaka A/B: could not mount verified slot $slot"
+        veritysetup close arasaka-vroot 2>/dev/null
+        return 1
+    fi
+    msg "Arasaka A/B: mounted slot $slot at $newroot (squashfs via dm-verity, read-only)"
+    return 0
+}
+
+mount_slot_ext4() {
+    # $1 = slot letter, $2 = newroot. Fresh-install fallback: the slot is a
+    # plain ext4 partition. The type is forced so a stray squashfs image can
+    # never be mounted unverified through this path.
+    local slot="$1" newroot="$2" rootdev
+    rootdev="$(find_slot_partition "$slot")" || return 1
+    [ -b "$rootdev" ] || return 1
+    mkdir -p "$newroot"
+    if mount -t ext4 -o ro "$rootdev" "$newroot" 2>/dev/null; then
+        msg "Arasaka A/B: mounted slot $slot at $newroot (ext4, read-only)"
         return 0
     fi
     return 1
 }
 
 try_mount_slot() {
-    # $1 = slot letter, $2 = newroot
-    local slot="$1" newroot="$2" rootdev
-    rootdev="$(find_slot_partition "$slot")" || return 1
-    [ -b "$rootdev" ] || return 1
-    mkdir -p "$newroot"
-    # Mount the slot READ-ONLY: the rootfs (incl. /etc) is immutable.
-    # Writable state is layered on top (overlayfs for /var) from the data
-    # partition; /etc runtime config is bound from /data by persist-data.
-    mount -o ro "$rootdev" "$newroot" 2>/dev/null || return 1
-    return 0
+    # $1 = slot letter, $2 = newroot. A verity conf selects the verified path;
+    # without one the slot is still a fresh-install ext4 root.
+    if [ -f "${abmnt}/ab/verity-$1.conf" ]; then
+        mount_slot_verity "$1" "$2"
+    else
+        mount_slot_ext4 "$1" "$2"
+    fi
+}
+
+bind_machine_id() {
+    # $1 = newroot, $2 = boot mount point (/ab). The squashfs slots are
+    # read-only and the baked id inside them is shared by every device running
+    # the same bundle, so the per-device machine-id lives on /boot and is bound
+    # over the baked /etc/machine-id here (systemd then derives all identity
+    # from it).
+    local newroot="$1" bootmnt="$2"
+    if [ ! -s "${bootmnt}/ab/machine-id" ]; then
+        mkdir -p "${bootmnt}/ab"
+        # No id yet (very first boot of a hand-copied image): generate one.
+        # /boot is writable; the slot is not.
+        if ! od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' > "${bootmnt}/ab/machine-id" 2>/dev/null; then
+            msg "Arasaka A/B: WARNING - could not create machine-id on /boot"
+            return 0
+        fi
+        chmod 444 "${bootmnt}/ab/machine-id" 2>/dev/null || true
+    fi
+    if mount --bind "${bootmnt}/ab/machine-id" "${newroot}/etc/machine-id" 2>/dev/null; then
+        msg "Arasaka A/B: bound /boot/ab/machine-id to /etc/machine-id"
+    else
+        msg "Arasaka A/B: WARNING - could not bind machine-id from /boot"
+    fi
+}
+
+keep_boot_mounted() {
+    # $1 = current boot mount point (/ab), $2 = newroot. Move the boot
+    # partition onto the new root's /boot (bind + drop the scratch mount) so it
+    # survives switch_root and the running system sees /boot mounted rw.
+    local abmnt="$1" newroot="$2"
+    [ -d "$abmnt" ] || return 0
+    mkdir -p "${newroot}/boot"
+    if mount --bind "$abmnt" "${newroot}/boot" 2>/dev/null; then
+        umount "$abmnt" 2>/dev/null
+        msg "Arasaka A/B: boot partition moved onto /boot (rw)"
+    else
+        msg "Arasaka A/B: WARNING - could not keep the boot partition mounted"
+    fi
 }
 
 overlay_writable_dirs() {
@@ -109,23 +223,26 @@ overlay_writable_dirs() {
 
 arasaka_ab_mount() {
     NEWROOT="$1"
-    local bootdev slot prev abmnt
+    local bootdev slot prev abmnt bootmounted
     abmnt=/ab
+    bootmounted=0
     bootdev="$(find_boot_partition)" || bootdev=""
     slot="a"
     prev="a"
 
-    # Overlayfs and btrfs are loaded via the initramfs modules; the busybox
-    # sh wrapper cannot rely on the `filesystems` hook for these, so ask the
-    # kernel explicitly (no-ops if already loaded).
+    # Modules are declared in MODULES= and loaded by the arasaka-verity hook;
+    # ask the kernel explicitly anyway (no-ops if already loaded).
     modprobe overlay 2>/dev/null || true
     modprobe btrfs 2>/dev/null || true
+    modprobe dm-verity 2>/dev/null || true
 
     # Read A/B state from the boot partition. prev is only meaningful when a
-    # swap is pending.
+    # swap is pending. The boot mount is kept and moved onto the new root
+    # below, so it is NOT unmounted here.
     if [ -n "$bootdev" ]; then
         mkdir -p "$abmnt"
         if mount -o rw "$bootdev" "$abmnt" 2>/dev/null; then
+            bootmounted=1
             slot="$(cat "$abmnt/ab/active-slot" 2>/dev/null || echo a)"
             prev="$(cat "$abmnt/ab/swap-pending" 2>/dev/null || echo "$slot")"
 
@@ -142,7 +259,6 @@ arasaka_ab_mount() {
                 msg "Arasaka A/B: trial boot of new slot $slot (commit on success)"
                 echo 1 > "$abmnt/ab/swap-tried"
             fi
-            umount "$abmnt" 2>/dev/null
         else
             msg "Arasaka A/B: could not mount boot partition; using cmdline root"
         fi
@@ -153,22 +269,32 @@ arasaka_ab_mount() {
     if [ -n "$slot" ] && try_mount_slot "$slot" "$NEWROOT"; then
         msg "Arasaka A/B: mounted slot $slot at $NEWROOT (read-only)"
         overlay_writable_dirs "$NEWROOT"
+        bind_machine_id "$NEWROOT" "$abmnt"
+        keep_boot_mounted "$abmnt" "$NEWROOT"
         return 0
     fi
 
-    # The active slot failed to mount while a swap was pending: roll back to
-    # the previous slot instead of wedging on a bad update.
+    # The active slot failed to mount (incl. verity open failure) while a swap
+    # was pending: roll back to the previous slot instead of wedging on a bad
+    # update.
     if [ -n "$bootdev" ] && [ -n "$prev" ] && [ "$prev" != "$slot" ]; then
         msg "Arasaka A/B: failed to mount slot $slot - rolling back to slot $prev"
-        mkdir -p "$abmnt"
-        if mount -o rw "$bootdev" "$abmnt" 2>/dev/null; then
+        if [ "$bootmounted" -eq 1 ]; then
             echo "$prev" > "$abmnt/ab/active-slot"
             rm -f "$abmnt/ab/swap-pending" "$abmnt/ab/swap-tried"
-            umount "$abmnt" 2>/dev/null
+        else
+            mkdir -p "$abmnt"
+            if mount -o rw "$bootdev" "$abmnt" 2>/dev/null; then
+                bootmounted=1
+                echo "$prev" > "$abmnt/ab/active-slot"
+                rm -f "$abmnt/ab/swap-pending" "$abmnt/ab/swap-tried"
+            fi
         fi
         if try_mount_slot "$prev" "$NEWROOT"; then
             msg "Arasaka A/B: mounted previous slot $prev at $NEWROOT (read-only)"
             overlay_writable_dirs "$NEWROOT"
+            bind_machine_id "$NEWROOT" "$abmnt"
+            keep_boot_mounted "$abmnt" "$NEWROOT"
             return 0
         fi
     fi

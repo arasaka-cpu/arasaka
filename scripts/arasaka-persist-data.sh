@@ -15,9 +15,9 @@ BINDS=(/var/lib/flatpak /var/snap /var/lib/snapd /var/lib/systemd /var/log /var/
 # Runtime /etc state. /etc itself is part of the read-only slot image, so the
 # few places a desktop actually writes configuration (Wi-Fi connections via
 # NetworkManager, printers via CUPS) are seeded once from the baked image and
-# then bound from /data. machine-id is not bound: it is baked at build time and
-# regenerated per device at install time (see arasaka-finalize-install.sh,
-# rauc-boot-handler.sh, install-to-disk.sh).
+# then bound from /data. machine-id is not bound here: the squashfs slots are
+# read-only and shared, so the per-device id lives on /boot/ab/machine-id and
+# is bound over /etc/machine-id by the arasaka-ab initramfs hook.
 ETC_STATE=(NetworkManager cups)
 
 log() { echo "[arasaka-persist] $*"; }
