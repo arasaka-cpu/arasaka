@@ -1250,7 +1250,7 @@ ZPEOF
         cat > /etc/skel/.zshrc << ZSEOF
 # Arasaka zsh config - clean, fast, desktop-friendly.
 autoload -Uz compinit && compinit
-zstyle ':completion:*' menu select
+zstyle ":completion:*" menu select
 
 setopt AUTO_CD
 setopt EXTENDED_GLOB
@@ -1267,8 +1267,9 @@ alias la="ls -A"
 alias l="ls -lF"
 # No sudo/su on the installed system by design: the rootfs is immutable and
 # updates are automatic (OTA). Keep the command discoverable so users know the
-# log location instead of hitting a missing-sudo error.
-alias update="echo 'Updates are automatic; see /var/log/arasaka-update.log'"
+# log location instead of hitting a missing-sudo error. NOTE: no single quotes
+# inside this block - it lives in a single-quoted bash -c string.
+alias update="echo Updates are automatic - see /var/log/arasaka-ota.log"
 alias up="update"
 alias reboot="systemctl reboot"
 alias poweroff="systemctl poweroff"
