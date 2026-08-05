@@ -196,6 +196,32 @@ jobs:
              OTA_SIGNING_CERT="/tmp/ota/signing.crt" \
              ./build-bundle.sh'
 
+      # Collect bundle-build debug artifacts (make-verity output, system info)
+      # out of the chroot so they survive even when the bundle step fails.
+      - name: Collect bundle debug artifacts
+        if: always()
+        run: |
+          set -uo pipefail
+          DBG="${CHROOT_DIR}/${REPO_DIR}/build/debug"
+          if [ -d "$DBG" ]; then
+            mkdir -p "${GITHUB_WORKSPACE}/debug"
+            sudo cp -a "$DBG/." "${GITHUB_WORKSPACE}/debug/" 2>/dev/null || true
+          else
+            echo "no debug dir at $DBG (bundle step failed before dump-system-info)"
+          fi
+          echo "=== debug files ==="
+          ls -la "${GITHUB_WORKSPACE}/debug" 2>/dev/null || true
+          echo "=== make-verity-output.txt (head) ==="
+          sed -n '1,200p' "${GITHUB_WORKSPACE}/debug/make-verity-output.txt" 2>/dev/null || true
+
+      - name: Upload bundle debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arasaka-bundle-debug
+          path: debug/
+          if-no-files-found: ignore
+
       - name: Copy ISO out of chroot
         run: |
           set -euo pipefail

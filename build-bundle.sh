@@ -158,6 +158,13 @@ build_rootfs_img() {
     # scripts/make-verity-slot.sh so shipped and freshly-installed slots are
     # produced identically.
     log "Building squashfs + dm-verity slot image..."
+    # Drop the /proc /sys /dev /run bind mounts before squashing. mksquashfs
+    # descending a LIVE /proc is pathologically slow and OOM-prone (thousands
+    # of entries, vanishing files, pseudo-devices); make-verity-slot.sh also
+    # hard-excludes them, but umount first keeps the hardened tree clean.
+    for d in proc sys dev run; do
+        run umount -lf "${HARDENED}/${d}" 2>/dev/null || true
+    done
     rm -f "${IMG}"
     mkdir -p "${DEBUG_DIR}"
     local vout

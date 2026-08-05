@@ -47,16 +47,23 @@ command -v veritysetup >/dev/null 2>&1 \
 [ -d "${SRC}" ] || { echo "make-verity-slot: source tree not found: ${SRC}" >&2; exit 1; }
 
 rm -f "${IMG}"
+# Always exclude pseudo/temporary filesystems and staging dirs: a source tree
+# may have live /proc|/sys|/dev|/run bind mounts (build-bundle's hardened copy
+# leaves /proc etc. mounted until we snap it; mksquashfs descending a live /proc
+# is pathologically slow and OOM-prone). Caller-supplied --exclude flags still
+# win and are appended after these defaults.
+default_excludes=(proc sys dev run tmp mnt)
 if [ ${#EXCLUDES[@]} -gt 0 ]; then
     mksquashfs "${SRC}" "${IMG}" \
         -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend -no-progress \
-        -e "${EXCLUDES[@]}" 2>&1 || {
+        -e "${EXCLUDES[@]}" "${default_excludes[@]}" 2>&1 || {
             echo "make-verity-slot: mksquashfs failed (exit $?)" >&2
             exit 1
         }
 else
     mksquashfs "${SRC}" "${IMG}" \
-        -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend -no-progress 2>&1 || {
+        -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend -no-progress \
+        -e "${default_excludes[@]}" 2>&1 || {
             echo "make-verity-slot: mksquashfs failed (exit $?)" >&2
             exit 1
         }
