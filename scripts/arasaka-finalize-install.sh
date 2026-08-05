@@ -37,6 +37,20 @@ if [ -f "${TARGET}/etc/shadow" ]; then
     sed -i 's/^root:\([^:]*\):/root:!:/' "${TARGET}/etc/shadow"
 fi
 
+# The live ISO's "user" account has a well-known password ("live"). If a real
+# account exists alongside it (the normal Calamares install), lock it out; if
+# it is the ONLY real account, it is the account Calamares set up (or the only
+# account a bundle lands on), so leave it alone.
+if [ -f "${TARGET}/etc/passwd" ] && [ -f "${TARGET}/etc/shadow" ]; then
+    other_accounts=$(grep -Ev '^#|^$' "${TARGET}/etc/passwd" | while IFS=: read -r name _ uid _; do
+        [ "$uid" -ge 1000 ] 2>/dev/null && [ "$name" != "user" ] && echo "$name"
+    done)
+    if [ -n "$other_accounts" ]; then
+        sed -i 's/^user:\([^:]*\):/user:!:/' "${TARGET}/etc/shadow"
+        echo "[arasaka-finalize] Live 'user' account locked (other real accounts exist)"
+    fi
+fi
+
 # Remove the sudoers stack entirely. With sudo/su unusable there is nothing to
 # configure; leaving files around would only invite a sudoers misconfig.
 rm -rf "${TARGET}/etc/sudoers.d" 2>/dev/null || true
