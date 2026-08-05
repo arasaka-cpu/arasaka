@@ -5,17 +5,21 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
 
 ## Highlights
 
-- **Immutable A/B rootfs** — two raw slots (`arasaka-slot-a` / `arasaka-slot-b`)
-  on a shared btrfs data partition (`arasaka-data`). After the first OTA each
-  slot holds a squashfs image verified block-by-block through dm-verity at
-  every boot. Slots are replaced wholesale by updates; all user/system state
-  lives on `/data` and survives OTA slot swaps.
+- **Immutable A/B rootfs** — two raw slot partitions (`arasaka-slot-a` /
+  `arasaka-slot-b`) beside a shared btrfs data partition (`arasaka-data`). A
+  fresh install writes plain ext4 slots; the first OTA that targets a slot
+  replaces it with a squashfs image carrying an appended dm-verity hash tree,
+  verified block-by-block at every boot. Slots are replaced wholesale by
+  updates; all persistent user and runtime state lives on `/data` and the
+  writable `/boot`, and survives OTA slot swaps.
 - **Signed OTA updates** — RAUC `verity` bundles signed with the OTA key,
   downloaded from a Backblaze B2 updates bucket, verified against a baked-in
   keyring, and installed to the inactive slot. No Arch mirrors at runtime.
 - **systemd-boot with a custom RAUC backend** — slot switching is done by a
-  boot handler that swaps loader entries, records kernel/initramfs hashes, and
-  marks slots good/bad. A failed boot falls back to the previous slot.
+  boot handler that points `loader.conf`'s `default` at the new slot's entry,
+  re-extracts the kernel/initramfs from the freshly-written slot into `/boot`,
+  records their hashes, and marks slots good/bad. A failed or tampered boot
+  falls back to the previous slot.
 - **Automatic weekly updates** — `arasaka-update.timer` checks the signed
   update pointer, and `arasaka-reboot-after-update.timer` reboots into the new
   slot after a successful install.
@@ -56,13 +60,16 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
 ```
 
 - **Slots**: two raw rootfs slots, selected by `rauc.slot=A|B` on the kernel
-  command line and mounted by the initramfs A/B hook. After the first OTA each
-  slot is a squashfs image whose blocks are verified through dm-verity at boot
-  (root hash + hash offset in `/boot/ab/verity-<slot>.conf`, written by the
-  bundle's post-install hook); a fresh install's ext4 slot is mounted read-only
-  as a fallback. Slots are immutable: updates replace a whole slot, and no user
-  data lives on them — all persistent state lives on the shared btrfs data
-  partition (`/data`), which survives every update.
+  command line and mounted read-only by the initramfs A/B hook. Each slot holds
+  either a fresh-install ext4 filesystem or (once updated) a squashfs image
+  with an appended dm-verity hash tree. When `/boot/ab/verity-<slot>.conf`
+  exists (root hash + hash offset written by the bundle's post-install hook)
+  the hook opens the slot with `veritysetup` and mounts `/dev/mapper`; plain
+  ext4 is mounted only when no verity conf exists. A dm-verity open failure
+  never falls back to an unverified mount — the rollback path takes over.
+  Slots are immutable: updates replace a whole slot, and no user data lives on
+  them — persistent state lives on the shared btrfs data partition (`/data`),
+  which survives every update.
 - **RAUC**: `config/rauc/system.conf` describes the slots and a custom
   `bootloader=custom` backend (`/usr/lib/rauc/rauc-boot-handler.sh`) that
   performs the systemd-boot slot switching, kernel/initramfs hash recording,
@@ -97,13 +104,15 @@ COSMIC, with signed over-the-air updates delivered via RAUC.
 | `create-iso.sh` | Builds the bootable live ISO with the Calamares installer. |
 | `build-bundle.sh` | Packs the built rootfs into a signed RAUC verity bundle. |
 | `install-to-disk.sh` | Disk installer logic: partitions, A/B slots, loader entries, RAUC state. |
+| `cleanup-stale-rootfs.sh` | Removes stale files from a previously built rootfs before re-running `build.sh`. |
 | `config/rauc/` | RAUC `system.conf`, the device CA (`ca.crt`) and OTA signing cert (`signing.crt`). |
 | `config/calamares/` | Calamares installer branding, modules, and scripts. |
-| `scripts/` | Boot handler, OTA update engine, boot verification, data persistence, install hardening. |
-| `systemd/` | Units + timers for updates, boot verification, mark-good, data persistence. |
-| `initcpio/` | Initramfs A/B + dm-verity hooks and the mkinitcpio drop-in (busybox-style initramfs). |
+| `scripts/` | RAUC boot handler + system-info, OTA update engine, boot verification, boot-succeeded confirmation, data persistence, update reboot, read-only remount, install hardening. |
+| `systemd/` | Units + timers for updates, update reboot, boot verification, mark-good, boot-succeeded, data persistence, and read-only remount. |
+| `initcpio/` | Initramfs A/B + dm-verity hooks: read-only slot mount (verity or ext4), `/var` overlay on `/data`, per-device machine-id bind, boot-attempt rollback markers. |
 | `aur/` | Local AUR-style packages: calamares, snapd, system76-power, findutils. |
 | `branding/` | Logo and product artwork. |
+| `plymouth/` | Boot splash theme. |
 | `.github/workflows/build-iso.yml` | CI: build ISO + OTA bundle, upload to B2. |
 
 ## Building locally
