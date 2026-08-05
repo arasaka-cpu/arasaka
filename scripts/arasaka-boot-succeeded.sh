@@ -2,8 +2,9 @@
 # arasaka-boot-succeeded.sh
 # Commits a pending A/B slot swap once the new slot boots successfully.
 #
-# During an update, arasaka-update.sh writes swap-pending and flips
-# active-slot to the new slot. On the next boot the initramfs hook
+# During an update the RAUC boot handler (sync_legacy_markers) writes
+# swap-pending and flips active-slot to the new slot. On the next boot the
+# initramfs hook
 # (arasaka-ab) leaves a swap-tried marker. If this service reaches
 # multi-user.target (i.e. the new slot actually booted and came up), the
 # swap is committed: swap-pending + swap-tried are removed.
