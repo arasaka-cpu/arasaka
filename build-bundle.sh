@@ -133,24 +133,17 @@ build_rootfs_img() {
     # Pack the hardened rootfs into a squashfs image and append a dm-verity
     # hash tree to the SAME file (--hash-offset). The slot is a raw container;
     # the hash tree rides inside it. The root hash + offset are baked into the
-    # bundle hook below and written to /boot on the device.
+    # bundle hook below and written to /boot on the device. Delegated to
+    # scripts/make-verity-slot.sh so shipped and freshly-installed slots are
+    # produced identically.
     log "Building squashfs + dm-verity slot image..."
     rm -f "${IMG}"
-    run_verbose mksquashfs "${HARDENED}" "${IMG}" \
-        -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend
-
-    local img_size off
-    img_size=$(run stat -c %s "${IMG}")
-    # Hash tree must start on a block boundary: round the image size up to the
-    # next 4096 block so data and hash areas never overlap.
-    off=$(( (img_size + 4095) / 4096 * 4096 ))
-    ROOT_HASH=$(run_verbose veritysetup format \
-        --format=1 \
-        --data-block-size=4096 --hash-block-size=4096 \
-        --hash-offset="${off}" \
-        "${IMG}" "${IMG}" | sed -n 's/^Root hash:[[:space:]]*//p')
-    [ -n "${ROOT_HASH}" ] || die "veritysetup format failed - no root hash captured"
-    HASH_OFFSET="${off}"
+    local vout
+    vout=$(run_verbose "$(dirname "$0")/scripts/make-verity-slot.sh" "${HARDENED}" "${IMG}")
+    ROOT_HASH=$(printf '%s\n' "${vout}" | sed -n 's/^root_hash=//p')
+    HASH_OFFSET=$(printf '%s\n' "${vout}" | sed -n 's/^hash_offset=//p')
+    [ -n "${ROOT_HASH}" ] && [ -n "${HASH_OFFSET}" ] \
+        || die "make-verity-slot.sh failed (no root hash/offset captured)"
     log "Verity root hash: ${ROOT_HASH}"
     log "Hash offset:      ${HASH_OFFSET}"
 }

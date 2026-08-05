@@ -37,8 +37,7 @@ This will DESTROY all data on the target disk!
 Disk layout:
   Partition 1: EFI System Partition (512MB, FAT32)
   Partition 2: Boot (1GB, ext4)
-  Partition 3: Slot A root (20GB, ext4 on fresh install; becomes a raw
-               squashfs + dm-verity image after the first OTA)
+  Partition 3: Slot A root (20GB, raw squashfs + dm-verity image)
   Partition 4: Slot B root (20GB, same)
   Partition 5: Data (remaining, btrfs - /home, /var/lib/flatpak, etc.)
 EOF
@@ -107,10 +106,11 @@ partition_disk() {
         p5="${target}5"
     fi
 
-    # Format partitions. The slots stay ext4 on a fresh install; the arasaka-ab
-    # initramfs hook mounts them read-only. The FIRST OTA replaces a slot with
-    # a raw squashfs + dm-verity image (verified at every boot), and the
-    # verity/fallback dispatch in the hook keeps both shapes working.
+    # Format partitions. The slots are formatted ext4 purely as a writable
+    # staging area for the rootfs (slot A); after the tree is finalized and its
+    # initramfs regenerated, install_rootfs() packs it into a raw squashfs +
+    # dm-verity image and writes that image to BOTH slots, so a fresh install
+    # is block-verified from the very first boot.
     log "Formatting partitions..."
     echo "$PASSWORD" | sudo -S mkfs.fat -F32 -n EFI "$p1"
     echo "$PASSWORD" | sudo -S mkfs.ext2 -L arasaka-boot "$p2"
@@ -274,17 +274,52 @@ FSTABEOF
             sudo cp "${mnt}/slot-a/boot/initramfs-linux.img" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || true
         sudo cp "${mnt}/boot/initramfs-arasaka-a.img" "${mnt}/boot/initramfs-arasaka-b.img" 2>/dev/null || true
     else
-        log "WARNING: mkinitcpio regeneration failed; keeping prebuilt initramfs" >&2
-        sudo cp "${ROOTFS}/boot/${imgname}" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
-            sudo cp /boot/${imgname} "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
-            sudo cp /boot/initramfs-linux.img "${mnt}/boot/initramfs-arasaka-a.img"
-        sudo cp "${mnt}/boot/initramfs-arasaka-a.img" "${mnt}/boot/initramfs-arasaka-b.img" 2>/dev/null || true
+        die "initramfs regeneration failed; aborting (a fresh install must ship the A/B + dm-verity initramfs)"
     fi
 
     # Per-device machine-id on /boot (the slots are read-only squashfs shared
     # across devices; the arasaka-ab hook binds this over /etc/machine-id).
     od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | sudo tee "${mnt}/boot/ab/machine-id" >/dev/null || true
     sudo chmod 444 "${mnt}/boot/ab/machine-id" 2>/dev/null || true
+
+    # Drop the chroot bind mounts before packing so mksquashfs never recurses
+    # into them.
+    for d in proc sys dev run; do
+        sudo umount -lf "${mnt}/slot-a/${d}" 2>/dev/null || true
+    done
+
+    # Pack the finalized tree into a raw squashfs + dm-verity slot image (the
+    # same tool the OTA bundle builder uses) and write it to BOTH slot
+    # partitions. A fresh install is therefore block-verified from the very
+    # first boot - there is no unverified ext4 window before the first OTA.
+    log "Building squashfs + dm-verity slot image..."
+    local img="${BUILD_DIR}/rootfs.img"
+    local conf="${BUILD_DIR}/verity.conf"
+    sudo rm -f "${img}" "${conf}"
+    echo "$PASSWORD" | sudo -S "$(dirname "$0")/scripts/make-verity-slot.sh" \
+        "${mnt}/slot-a" "${img}" "${conf}" || die "verity slot image build failed"
+    local img_bytes
+    img_bytes=$(sudo stat -c %s "${img}")
+
+    sudo umount "${mnt}/slot-a"
+
+    log "Writing verified slot image to slots A and B..."
+    local slot_dev slot_bytes
+    for slot_dev in "$p3" "$p4"; do
+        slot_bytes=$(sudo blockdev --getsize64 "$slot_dev")
+        if [ "$img_bytes" -gt "$slot_bytes" ]; then
+            die "slot image (${img_bytes} bytes) larger than partition ${slot_dev} (${slot_bytes} bytes)"
+        fi
+        echo "$PASSWORD" | sudo -S dd if="${img}" of="${slot_dev}" bs=1M conv=fsync status=none
+    done
+    sudo sync
+
+    # Write the verity conf (root hash + hash offset) the initramfs hook reads
+    # to open a slot through dm-verity. Both slots carry the same image, so the
+    # conf is identical for A and B.
+    sudo cp "${conf}" "${mnt}/boot/ab/verity-a.conf"
+    sudo cp "${conf}" "${mnt}/boot/ab/verity-b.conf"
+    sudo rm -f "${img}" "${conf}"
 
     # Record the kernel/initramfs baseline for slot A (RAUC state dir lives on
     # the data partition; arasaka-verify-boot compares these at boot).
@@ -293,13 +328,8 @@ FSTABEOF
 
     # Unmount everything
     log "Unmounting..."
-    sudo umount -rf "${mnt}/slot-a/proc" 2>/dev/null || true
-    sudo umount -rf "${mnt}/slot-a/sys" 2>/dev/null || true
-    sudo umount -rf "${mnt}/slot-a/dev" 2>/dev/null || true
-    sudo umount -rf "${mnt}/slot-a/run" 2>/dev/null || true
     sudo umount -rf "${mnt}/boot-efi" 2>/dev/null || true
     sudo umount -rf "${mnt}/boot" 2>/dev/null || true
-    sudo umount -rf "${mnt}/slot-a" 2>/dev/null || true
     sudo umount -rf "${mnt}/data" 2>/dev/null || true
     sudo rm -rf "$mnt"
 
