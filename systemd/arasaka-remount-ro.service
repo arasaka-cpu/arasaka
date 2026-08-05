@@ -1,0 +1,16 @@
+[Unit]
+Description=Arasaka Read-Only Root Guard
+# Runs early in boot, right after the filesystems come up, and before any
+# daemon or user session starts, so the rest of the system sees a read-only
+# root. The initramfs hook already mounts the slot ro; this verifies it.
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arasaka-remount-ro.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

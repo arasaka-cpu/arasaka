@@ -109,6 +109,21 @@ rebuild_initramfs() {
     run umount -lf "${IMG_MNT}/proc" 2>/dev/null || true
 }
 
+finalize_image() {
+    # Harden the IMAGE the same way a fresh install is hardened, so an OTA
+    # update does not re-introduce sudo/su/pkexec, wheel membership, the
+    # installer or the live polkit rules. The rootfs is the live-style build
+    # output (which MUST keep sudo for the installer); here it becomes the
+    # immutable installed-system shape. See scripts/arasaka-finalize-install.sh.
+    log "Hardening image (no sudo/wheel/installer)..."
+    if run arch-chroot "${IMG_MNT}" /bin/bash \
+        /usr/local/bin/arasaka-finalize-install.sh /; then
+        log "image hardened"
+    else
+        die "finalize-install failed inside image"
+    fi
+}
+
 write_bundle() {
     log "Writing bundle directory + manifest..."
     # Recreate the bundle dir as the invoking user (a previous run may have
@@ -184,6 +199,7 @@ main() {
 
     build_slot_image
     rebuild_initramfs
+    finalize_image
     run_quiet umount -lf "${IMG_MNT}" 2>/dev/null || true
     run_quiet rm -rf "${IMG_MNT}"
 

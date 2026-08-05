@@ -201,12 +201,13 @@ console-mode auto
 editor no
 LEOF
 
-    # Slot A boot entry (per-slot kernel)
+    # Slot A boot entry (per-slot kernel). The slot root is mounted read-only
+    # by the arasaka-ab initramfs hook; `ro` here is the fallback cmdline.
     sudo tee "${mnt}/boot/loader/entries/arasaka-a.conf" >/dev/null << AEOF
 title   Arasaka (Slot A)
 linux   /vmlinuz-arasaka-a
 initrd  /initramfs-arasaka-a.img
-options root=/dev/disk/by-label/arasaka-slot-a rw rauc.slot=A
+options root=/dev/disk/by-label/arasaka-slot-a ro rauc.slot=A
 AEOF
 
     # Slot B boot entry (per-slot kernel)
@@ -214,7 +215,7 @@ AEOF
 title   Arasaka (Slot B)
 linux   /vmlinuz-arasaka-b
 initrd  /initramfs-arasaka-b.img
-options root=/dev/disk/by-label/arasaka-slot-b rw rauc.slot=B
+options root=/dev/disk/by-label/arasaka-slot-b ro rauc.slot=B
 BEOF
 
     # Copy kernel and initramfs to /boot with per-slot names (slot A active).
@@ -240,12 +241,16 @@ BEOF
     # Copy squashfs to boot/ab
     sudo cp "${mnt}/slot-a/arasaka-rootfs.sfs" "${mnt}/boot/ab/arasaka-rootfs.sfs"
 
-    # Create fstab for the installed system
+    # Create fstab for the installed system. /boot stays writable (A/B swap
+    # markers + kernel extraction); /var/tmp is tmpfs because the root slot is
+    # mounted read-only. /etc and /var get overlayfs from /data in the
+    # initramfs hook, so no fstab entry is needed for them.
     sudo tee "${mnt}/slot-a/etc/fstab" >/dev/null << FSTABEOF
 # Arasaka fstab - systemd manages mounts
 /dev/disk/by-label/arasaka-boot    /boot           ext4    defaults,noatime 0 2
 /dev/disk/by-label/arasaka-data    /data           btrfs   defaults,noatime,compress=zstd,subvol=/ 0 1
 /dev/disk/by-label/EFI              /boot/efi       vfat    defaults,noatime 0 2
+tmpfs                               /var/tmp        tmpfs   defaults,noatime,mode=1777 0 0
 FSTABEOF
 
     # Copy install scripts to the installed system

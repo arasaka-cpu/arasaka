@@ -7,6 +7,9 @@ RequiresMountsFor=/boot
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/arasaka-boot-succeeded.sh
+ProtectSystem=strict
+ReadWritePaths=/boot /data
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

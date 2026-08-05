@@ -7,6 +7,9 @@ RequiresMountsFor=/data
 Type=oneshot
 ExecStart=/usr/local/bin/arasaka-verify-boot.sh
 RemainAfterExit=yes
+ProtectSystem=strict
+ReadWritePaths=/data /var/log
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

@@ -545,6 +545,18 @@ AAEOF
         mkdir -p /etc/apparmor.d/
         apparmor_parser -r /etc/apparmor.d/ 2>/dev/null || true
     '
+
+    # Stage the "no system writes even for root" escalation guard OUTSIDE
+    # /etc/apparmor.d so it is inert on the live ISO (the Calamares installer
+    # runs privileged actions via pkexec and must be able to write system
+    # paths). arasaka-postinstall.sh arms it on installed systems by copying it
+    # into the target's /etc/apparmor.d/.
+    local src_profile
+    src_profile="$(dirname "$0")/config/apparmor.d/arasaka-escalation"
+    if [ -f "${src_profile}" ]; then
+        run_quiet mkdir -p "${ROOTFS}/usr/share/arasaka/apparmor"
+        run_quiet cp "${src_profile}" "${ROOTFS}/usr/share/arasaka/apparmor/arasaka-escalation"
+    fi
 }
 
 configure_snap() {
@@ -669,6 +681,53 @@ polkit.addRule(function(action, subject) {
     if (action.id === "org.arasaka.installer.pkexec.run" && subject.user === "user") {
         return polkit.Result.YES;
     }
+});
+EOF
+
+    # Default-deny polkit policy for non-root users (live AND installed). The
+    # desktop user may only: install/update Flatpaks, manage Wi-Fi/NetworkManager,
+    # Bluetooth (bluez), printers (CUPS), and power/brightness via logind/UPower.
+    # The live installer's pkexec actions are exempted. Everything else - in
+    # particular org.freedesktop.systemd1.* (unit control), udisks2 mount/unmount,
+    # fwupd/AppArmor and anything touching filesystems - is explicitly denied.
+    # Root (uid 0) is untouched; polkit does not constrain uid 0 anyway.
+    cat > "${ROOTFS}/etc/polkit-1/rules.d/10-arasaka-policy.rules" << 'EOF'
+polkit.addRule(function(action, subject) {
+    if (subject.user === "root") {
+        return;
+    }
+    var allowPrefixes = [
+        "org.freedesktop.Flatpak.",
+        "org.freedesktop.NetworkManager.",
+        "org.bluez.",
+        "org.opensuse.cupspkhelper.",
+        "org.freedesktop.UPower.",
+        "org.freedesktop.login1.power-off",
+        "org.freedesktop.login1.reboot",
+        "org.freedesktop.login1.suspend",
+        "org.freedesktop.login1.hibernate",
+        "org.freedesktop.login1.set-brightness",
+        "io.calamares.calamares.pkexec.run",
+        "org.arasaka.installer.pkexec.run"
+    ];
+    for (var i = 0; i < allowPrefixes.length; i++) {
+        if (action.id.indexOf(allowPrefixes[i]) === 0) {
+            return polkit.Result.YES;
+        }
+    }
+    // Explicitly deny the highest-risk actions even if a future rule grants
+    // them; then deny everything else not allowlisted above.
+    if (action.id.indexOf("org.freedesktop.systemd1.") === 0) {
+        return polkit.Result.NO;
+    }
+    if (action.id.indexOf("org.freedesktop.udisks2.filesystem-mount") === 0 ||
+        action.id.indexOf("org.freedesktop.udisks2.filesystem-unmount") === 0) {
+        return polkit.Result.NO;
+    }
+    if (action.id.indexOf("org.apparmor.") === 0) {
+        return polkit.Result.NO;
+    }
+    return polkit.Result.NO;
 });
 EOF
 
@@ -1119,6 +1178,11 @@ configure_debloat() {
         pacman -Rdd --noconfirm openssh 2>&1 || true
         rm -f /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* 2>/dev/null || true
 
+        # Text editors are deliberately absent: nothing on the installed system
+        # is user-editable (read-only root, no sudo). The GUIs (cosmic-text-editor)
+        # cover user files.
+        pacman -Rdd --noconfirm nano vim vim-runtime 2>&1 || true
+
         # avahi (mDNS/Bonjour): the package cannot be removed - its libraries
         # are a hard runtime dependency of pipewire-pulse (audio), ostree
         # (flatpak) and cups (printing). But the avahi daemon is a network
@@ -1172,19 +1236,19 @@ HISTSIZE=10000
 SAVEHIST=10000
 
 # sudo forwards aliases/plugins into the elevated session.
-alias sudo="sudo "
-
 alias ls="ls --color=auto"
 alias ll="ls -lah"
 alias la="ls -A"
 alias l="ls -lF"
-alias update="sudo /usr/local/bin/arasaka-update.sh"
-alias up="sudo /usr/local/bin/arasaka-update.sh"
+# No sudo/su on the installed system by design: the rootfs is immutable and
+# updates are automatic (OTA). Keep the command discoverable so users know the
+# log location instead of hitting a missing-sudo error.
+alias update="echo 'Updates are automatic; see /var/log/arasaka-update.log'"
+alias up="update"
 alias reboot="systemctl reboot"
 alias poweroff="systemctl poweroff"
 
 PROMPT="%F{cyan}%n@%m%f:%F{green}%~%f %# "
-export EDITOR=nano
 ZSEOF
 
         cp /etc/skel/.zshrc /root/.zshrc
@@ -1243,9 +1307,10 @@ OTAEOF
 
     # The packaged rauc.service sandboxes heavily. The custom boot backend and
     # the installer need to write /boot (loader.conf + per-slot kernels), write
-    # /data/rauc (slot state), mount slots/bundles under /mnt/rauc and, on
-    # install, call the backend which mounts the freshly-written slot to extract
-    # its kernel. Relax the packaged sandbox so those operations succeed.
+    # /data/rauc (slot state) and mount slots/bundles under /data/rauc/mnt and,
+    # on install, call the backend which mounts the freshly-written slot to
+    # extract its kernel. Relax the packaged sandbox so those operations
+    # succeed.
     run_quiet mkdir -p "${ROOTFS}/etc/systemd/system/rauc.service.d"
     cat > "${tmpdir}/rauc-dropin.conf" << 'RAUCDROPIN'
 [Service]
@@ -1367,6 +1432,7 @@ copy_services() {
         systemctl enable arasaka-persist-data.service 2>/dev/null || true
         systemctl enable arasaka-verify-boot.service 2>/dev/null || true
         systemctl enable arasaka-rauc-mark-good.service 2>/dev/null || true
+        systemctl enable arasaka-remount-ro.service 2>/dev/null || true
     ' || true
 }
 

@@ -1,7 +1,10 @@
 [Unit]
 Description=Arasaka Persistent Data (bind flatpak/snap/snapd from /data)
 After=local-fs.target
-Before=snapd.service snapd.apparmor.service flatpak-system-update.service rauc.service
+# Bind /home and the /var state dirs in before the greeter/session starts so a
+# user login never races with the bind mounts. Also before snapd, flatpak
+# system updates and RAUC (which all read state that must come from /data).
+Before=display-manager.service cosmic-greeter.service snapd.service snapd.apparmor.service flatpak-system-update.service rauc.service
 
 [Service]
 Type=oneshot

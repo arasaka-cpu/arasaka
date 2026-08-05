@@ -3,10 +3,19 @@
 #
 # Replaces the default initramfs root mount: mounts the boot partition,
 # reads the active A/B slot marker, and mounts the active slot's root
-# partition (raw ext4, by label) as the real root. If a slot swap is
-# pending but the new slot's boot was not confirmed (swap-tried marker
-# left by an earlier, unsuccessful boot) the previous slot is restored
-# first - i.e. a slot is only ever adopted after it boots successfully.
+# partition (raw ext4, by label) as the real root READ-ONLY. If a slot
+# swap is pending but the new slot's boot was not confirmed (swap-tried
+# marker left by an earlier, unsuccessful boot) the previous slot is
+# restored first - i.e. a slot is only ever adopted after it boots
+# successfully.
+#
+# Immutability: the slot root is mounted ro and stays ro for the whole
+# boot. The only writable state on the running system lives on the btrfs
+# data partition (/data): /etc and /var get overlayfs mounts on top of
+# the ro slot (upper dirs on /data), and the persist-data service binds
+# the @home/@log/... subvolumes in at runtime. /tmp and /run are tmpfs
+# (systemd), so every path a desktop actually writes is covered while
+# /usr, /lib, /bin and /boot stay read-only.
 #
 # On a fresh install (no pending swap) this behaves like the stock
 # mkinitcpio mount handler, using the kernel cmdline root= as a fallback.
@@ -40,15 +49,59 @@ find_slot_partition() {
     return 1
 }
 
+find_data_partition() {
+    if [ -b /dev/disk/by-label/arasaka-data ]; then
+        echo /dev/disk/by-label/arasaka-data
+        return 0
+    fi
+    if [ -b /dev/disk/by-partlabel/arasaka-data ]; then
+        echo /dev/disk/by-partlabel/arasaka-data
+        return 0
+    fi
+    return 1
+}
+
 try_mount_slot() {
     # $1 = slot letter, $2 = newroot
     local slot="$1" newroot="$2" rootdev
     rootdev="$(find_slot_partition "$slot")" || return 1
     [ -b "$rootdev" ] || return 1
     mkdir -p "$newroot"
-    mount -o rw "$rootdev" "$newroot" 2>/dev/null || return 1
+    # Mount the slot READ-ONLY: the rootfs is immutable. Writable state is
+    # layered on top (overlayfs for /etc + /var) from the data partition.
+    mount -o ro "$rootdev" "$newroot" 2>/dev/null || return 1
     mkdir -p "$newroot/etc/arasaka" 2>/dev/null
     echo "$slot" > "$newroot/etc/arasaka/booted-slot" 2>/dev/null || true
+    return 0
+}
+
+overlay_writable_dirs() {
+    # $1 = newroot. Best-effort: overlay /etc and /var on top of the ro slot
+    # with upper/work dirs on the btrfs data partition, so user state survives
+    # A/B updates (data is never rewritten). Never fails the boot - if /data
+    # is missing the system comes up with a fully read-only root instead.
+    local newroot="$1" datadev datamnt
+    datadev="$(find_data_partition)" || {
+        msg "Arasaka A/B: no data partition - /etc and /var stay read-only"
+        return 0
+    }
+    datamnt="${newroot}/data"
+    mkdir -p "$datamnt"
+    if ! mount -t btrfs -o compress=zstd "$datadev" "$datamnt" 2>/dev/null; then
+        msg "Arasaka A/B: could not mount data partition for overlays"
+        return 0
+    fi
+
+    for d in etc var; do
+        mkdir -p "$datamnt/overlay/${d}-upper" "$datamnt/overlay/${d}-work"
+        if mount -t overlay overlay \
+            -o "lowerdir=${newroot}/${d},upperdir=${datamnt}/overlay/${d}-upper,workdir=${datamnt}/overlay/${d}-work" \
+            "${newroot}/${d}" 2>/dev/null; then
+            msg "Arasaka A/B: overlayfs for /${d} (writable on /data)"
+        else
+            msg "Arasaka A/B: WARNING - could not overlay /${d}; it stays read-only"
+        fi
+    done
     return 0
 }
 
@@ -59,6 +112,12 @@ arasaka_ab_mount() {
     bootdev="$(find_boot_partition)" || bootdev=""
     slot="a"
     prev="a"
+
+    # Overlayfs and btrfs are loaded via the initramfs modules; the busybox
+    # sh wrapper cannot rely on the `filesystems` hook for these, so ask the
+    # kernel explicitly (no-ops if already loaded).
+    modprobe overlay 2>/dev/null || true
+    modprobe btrfs 2>/dev/null || true
 
     # Read A/B state from the boot partition. prev is only meaningful when a
     # swap is pending.
@@ -90,7 +149,8 @@ arasaka_ab_mount() {
     fi
 
     if [ -n "$slot" ] && try_mount_slot "$slot" "$NEWROOT"; then
-        msg "Arasaka A/B: mounted slot $slot at $NEWROOT"
+        msg "Arasaka A/B: mounted slot $slot at $NEWROOT (read-only)"
+        overlay_writable_dirs "$NEWROOT"
         return 0
     fi
 
@@ -105,7 +165,8 @@ arasaka_ab_mount() {
             umount "$abmnt" 2>/dev/null
         fi
         if try_mount_slot "$prev" "$NEWROOT"; then
-            msg "Arasaka A/B: mounted previous slot $prev at $NEWROOT"
+            msg "Arasaka A/B: mounted previous slot $prev at $NEWROOT (read-only)"
+            overlay_writable_dirs "$NEWROOT"
             return 0
         fi
     fi

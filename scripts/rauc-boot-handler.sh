@@ -33,7 +33,10 @@ LOADER_CONF="${BOOT_DIR}/loader/loader.conf"
 ENTRIES_DIR="${BOOT_DIR}/loader/entries"
 AB_DIR="${BOOT_DIR}/ab"
 STATE_DIR="/data/rauc/boot"
-MNT="/mnt/rauc/new-slot"
+# Scratch mount for kernel extraction. The rootfs is read-only, so /mnt cannot
+# be written; /data is mounted before rauc.service runs (arasaka-persist-data
+# orders itself Before=rauc.service) and is always writable.
+MNT="/data/rauc/new-slot"
 
 log() { echo "[rauc-boot] $*" >&2; }
 die() { echo "[rauc-boot] FATAL: $*" >&2; exit 1; }

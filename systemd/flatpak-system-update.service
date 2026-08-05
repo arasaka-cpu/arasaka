@@ -12,6 +12,9 @@ ExecStart=/usr/bin/update-desktop-database /var/lib/flatpak/exports/share/applic
 ExecStart=/usr/bin/gtk-update-icon-cache -f /var/lib/flatpak/exports/share/icons/hicolor
 Nice=10
 IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=/var/lib/flatpak /run
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
