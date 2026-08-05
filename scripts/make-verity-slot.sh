@@ -50,23 +50,40 @@ rm -f "${IMG}"
 if [ ${#EXCLUDES[@]} -gt 0 ]; then
     mksquashfs "${SRC}" "${IMG}" \
         -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend -no-progress \
-        -e "${EXCLUDES[@]}"
+        -e "${EXCLUDES[@]}" 2>&1 || {
+            echo "make-verity-slot: mksquashfs failed (exit $?)" >&2
+            exit 1
+        }
 else
     mksquashfs "${SRC}" "${IMG}" \
-        -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend -no-progress
+        -comp zstd -Xcompression-level 19 -b 1M -no-xattrs -noappend -no-progress 2>&1 || {
+            echo "make-verity-slot: mksquashfs failed (exit $?)" >&2
+            exit 1
+        }
 fi
 
 img_size=$(stat -c %s "${IMG}")
 # The hash tree must start on a block boundary so the data and hash areas never
 # overlap: round the image size up to the next 4096 block.
 off=$(( (img_size + 4095) / 4096 * 4096 ))
+# Capture veritysetup's stderr so a failure is reported instead of silently
+# aborting via set -e on the pipeline (the || guard keeps the assignment from
+# tripping errexit; $? is the pipeline's own exit code).
+verr=$(mktemp)
+vrc=0
 root_hash=$(veritysetup format \
     --format=1 \
     --data-block-size=4096 --hash-block-size=4096 \
     --hash-offset="${off}" \
-    "${IMG}" "${IMG}" | sed -n 's/^Root hash:[[:space:]]*//p')
-[ -n "${root_hash}" ] \
-    || { echo "make-verity-slot: veritysetup format failed - no root hash captured" >&2; exit 1; }
+    "${IMG}" "${IMG}" 2>"${verr}" | sed -n 's/^Root hash:[[:space:]]*//p') || vrc=$?
+if [ -n "${root_hash}" ]; then
+    rm -f "${verr}"
+else
+    echo "make-verity-slot: veritysetup format failed (exit ${vrc})" >&2
+    cat "${verr}" >&2
+    rm -f "${verr}"
+    exit 1
+fi
 
 if [ -n "${CONF}" ]; then
     printf 'root_hash=%s\nhash_offset=%s\n' "${root_hash}" "${off}" > "${CONF}"
