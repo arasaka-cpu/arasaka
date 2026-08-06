@@ -485,12 +485,16 @@ jobs:
               raise SystemExit("cannot find apiUrl: " + json.dumps(auth)[:400])
           print(f"authorized: api={api_url}")
 
-          # b2_get_bucket_by_name: resolves a bucket without listing the
-          # account, which the bucket-restricted updates key cannot do (the
-          # previous b2_list_buckets call returned 401 for it).
-          bucket = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_get_bucket_by_name?bucketName={urllib.parse.quote(BUCKET)}"]))
-          bucket_id = bucket["bucketId"]
+          # Bucket-restricted app keys get 401/404 from b2_get_bucket_by_name
+          # (it does not work for restricted keys in practice). Resolve the
+          # bucket with b2_list_buckets filtered by bucketName instead — the
+          # same method used by the ISO upload above, which the restricted key
+          # is authorized to perform.
+          buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_list_buckets",
+              "--data-binary", json.dumps({"accountId": auth.get("accountId", ""),
+                                           "bucketName": BUCKET})]))
+          bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
           print(f"bucket {BUCKET} id {bucket_id}")
 
           up = curl_json(["-H", f"Authorization: {token}",

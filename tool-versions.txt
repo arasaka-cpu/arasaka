@@ -1,0 +1,51 @@
+mksquashfs: mksquashfs version 4.7.5 (2026/03/01)
+copyright (C) 2026 Phillip Lougher <phillip@squashfs.org.uk>
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2,
+or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+veritysetup: veritysetup 2.8.7 flags: UDEV BLKID KEYRING KERNEL_CAPI HW_OPAL 
+rauc: rauc 1.15.2
+desync: Error: unknown flag: --version
+Usage:
+  desync [command]
+
+Available Commands:
+  cache          Read indexes and copy the referenced chunks
+  cat            Stream a blob to stdout or a file-like object
+  chop           Read chunks from a file according to an index
+  chunk          Chunk input file and print chunk boundaries and IDs
+  chunk-server   Server for chunks over HTTP(S)
+  completion     Generate the autocompletion script for the specified shell
+  config         Show or write config file
+  extract        Read an index and build a blob from it
+  help           Help about any command
+  index-server   Server for indexes over HTTP(S)
+  info           Show information about an index
+  inspect-chunks Inspect chunks from an index and an optional local store
+  list-chunks    List chunk IDs from an index
+  make           Chunk input file and create index
+  manpage        Generate manpages for desync
+  mount-index    FUSE mount an index file
+  mtree          Print the content of a catar, caidx or local directory in mtree format
+  prune          Remove unreferenced chunks from a store
+  pull           Serve chunks via casync protocol over SSH
+  tar            Store a directory tree in a catar archive or index
+  untar          Extract a directory tree from a catar archive or index
+  verify         Read chunks in a store and verify their integrity
+  verify-index   Verify an index matches a file
+
+Flags:
+      --config string   config file (default $HOME/.config/desync/config.json)
+      --digest string   digest algorithm, sha512-256 or sha256 (default "sha512-256")
+  -h, --help            help for desync
+      --verbose         verbose mode
+
+Use "desync [command] --help" for more information about a command.
+

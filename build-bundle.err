@@ -1,0 +1,210 @@
++ '[' -n ci ']'
++ PASSWORD=ci
++ '[' -n ci ']'
++ SIGN_KEY=/tmp/ota/signing.key
++ SIGN_CERT=/tmp/ota/signing.crt
++ main
++ log '=== Arasaka OTA Bundle Builder ==='
+++ date +%H:%M:%S
++ echo '[bundle] 21:08:19 === Arasaka OTA Bundle Builder ==='
++ check
++ '[' -d /home/builder/arasaka/build/rootfs ']'
++ '[' -f /home/builder/arasaka/build/rootfs/boot/vmlinuz-linux ']'
++ command -v rauc
++ command -v mksquashfs
++ command -v veritysetup
++ '[' -n /tmp/ota/signing.key ']'
++ '[' -f /tmp/ota/signing.key ']'
++ '[' -n /tmp/ota/signing.crt ']'
++ '[' -f /tmp/ota/signing.crt ']'
+++ dirname ./build-bundle.sh
++ '[' -f ./config/rauc/ca.crt ']'
++ dump_system_info
++ log '--- system information ---'
+++ date +%H:%M:%S
++ echo '[bundle] 21:08:19 --- system information ---'
++ df -h /tmp /
++ free -h
++ ulimit -a
++ for t in mksquashfs veritysetup rauc desync
++ command -v mksquashfs
++ printf '%s: ' mksquashfs
++ mksquashfs --version
++ for t in mksquashfs veritysetup rauc desync
++ command -v veritysetup
++ printf '%s: ' veritysetup
++ veritysetup --version
++ for t in mksquashfs veritysetup rauc desync
++ command -v rauc
++ printf '%s: ' rauc
++ rauc --version
++ for t in mksquashfs veritysetup rauc desync
++ command -v desync
++ printf '%s: ' desync
++ desync --version
++ true
++ log '--- end system information ---'
+++ date +%H:%M:%S
++ echo '[bundle] 21:08:19 --- end system information ---'
+++ version_of_rootfs
+++ local v
++++ cat /home/builder/arasaka/build/rootfs/etc/arasaka/version
+++ v=20260805
+++ '[' -n 20260805 ']'
+++ case "$v" in
+++ echo 20260805.1
++ VERSION=20260805.1
++ log 'Version: 20260805.1'
+++ date +%H:%M:%S
++ echo '[bundle] 21:08:19 Version: 20260805.1'
++ prepare_hardened_rootfs
++ log 'Preparing hardened rootfs copy (installer/sudo stripped)...'
+++ date +%H:%M:%S
++ echo '[bundle] 21:08:19 Preparing hardened rootfs copy (installer/sudo stripped)...'
++ rm -rf /home/builder/arasaka/build/bundle-rootfs
++ run_quiet mkdir -p /home/builder/arasaka/build/bundle-rootfs
++ echo ci
++ sudo -S mkdir -p /home/builder/arasaka/build/bundle-rootfs
++ run_quiet rsync -aHAX --one-file-system --exclude '/dev/*' --exclude '/proc/*' --exclude '/sys/*' --exclude '/run/*' --exclude '/tmp/*' --exclude '/mnt/*' /home/builder/arasaka/build/rootfs/ /home/builder/arasaka/build/bundle-rootfs/
++ echo ci
++ sudo -S rsync -aHAX --one-file-system --exclude '/dev/*' --exclude '/proc/*' --exclude '/sys/*' --exclude '/run/*' --exclude '/tmp/*' --exclude '/mnt/*' /home/builder/arasaka/build/rootfs/ /home/builder/arasaka/build/bundle-rootfs/
++ write_canonical_fstab
++ cat
++ log 'Wrote canonical fstab (label-based, OTA-stable)'
+++ date +%H:%M:%S
++ echo '[bundle] 21:09:49 Wrote canonical fstab (label-based, OTA-stable)'
++ log 'Hardening image (no sudo/wheel/installer)...'
+++ date +%H:%M:%S
++ echo '[bundle] 21:09:49 Hardening image (no sudo/wheel/installer)...'
++ run arch-chroot /home/builder/arasaka/build/bundle-rootfs /bin/bash /usr/local/bin/arasaka-finalize-install.sh /
++ echo ci
++ sudo -S arch-chroot /home/builder/arasaka/build/bundle-rootfs /bin/bash /usr/local/bin/arasaka-finalize-install.sh /
++ log 'Regenerating initramfs inside hardened rootfs (A/B + dm-verity hooks)...'
+++ date +%H:%M:%S
++ echo '[bundle] 21:09:49 Regenerating initramfs inside hardened rootfs (A/B + dm-verity hooks)...'
++ run_quiet mkdir -p /home/builder/arasaka/build/bundle-rootfs/proc /home/builder/arasaka/build/bundle-rootfs/sys /home/builder/arasaka/build/bundle-rootfs/dev /home/builder/arasaka/build/bundle-rootfs/run
++ echo ci
++ sudo -S mkdir -p /home/builder/arasaka/build/bundle-rootfs/proc /home/builder/arasaka/build/bundle-rootfs/sys /home/builder/arasaka/build/bundle-rootfs/dev /home/builder/arasaka/build/bundle-rootfs/run
++ run mount --bind /proc /home/builder/arasaka/build/bundle-rootfs/proc
++ echo ci
++ sudo -S mount --bind /proc /home/builder/arasaka/build/bundle-rootfs/proc
++ run mount --bind /sys /home/builder/arasaka/build/bundle-rootfs/sys
++ echo ci
++ sudo -S mount --bind /sys /home/builder/arasaka/build/bundle-rootfs/sys
++ run mount --bind /dev /home/builder/arasaka/build/bundle-rootfs/dev
++ echo ci
++ sudo -S mount --bind /dev /home/builder/arasaka/build/bundle-rootfs/dev
++ run mount --bind /run /home/builder/arasaka/build/bundle-rootfs/run
++ echo ci
++ sudo -S mount --bind /run /home/builder/arasaka/build/bundle-rootfs/run
++ run arch-chroot /home/builder/arasaka/build/bundle-rootfs /usr/bin/bash -c 'mkinitcpio -P'
++ log 'initramfs regenerated'
+++ date +%H:%M:%S
++ echo '[bundle] 21:09:57 initramfs regenerated'
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/run
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/dev
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/sys
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/proc
++ build_rootfs_img
++ log 'Building squashfs + dm-verity slot image...'
+++ date +%H:%M:%S
++ echo '[bundle] 21:09:57 Building squashfs + dm-verity slot image...'
++ for d in proc sys dev run
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/proc
++ for d in proc sys dev run
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/sys
++ true
++ for d in proc sys dev run
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/dev
++ true
++ for d in proc sys dev run
++ run umount -lf /home/builder/arasaka/build/bundle-rootfs/run
++ true
++ rm -f /home/builder/arasaka/build/rootfs.img
++ mkdir -p /home/builder/arasaka/build/debug
++ local vout
++++ dirname ./build-bundle.sh
+++ run_verbose ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img
++ vout=$'++ echo ci\n++ sudo -S ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img\nParallel mksquashfs: Using 4 processors\nCreating 4.0 filesystem on /home/builder/arasaka/build/rootfs.img, block size 1048576.\n\nExportable Squashfs 4.0 filesystem, zstd compressed, data block size 1048576\n\tcompressed data, compressed metadata, compressed fragments,\n\tno xattrs, compressed ids\n\tduplicates are removed\nFilesystem size 4318428.13 Kbytes (4217.21 Mbytes)\n\t32.03% of uncompressed filesystem size (13483956.79 Kbytes)\nInode table size 2951658 bytes (2882.48 Kbytes)\n\t21.84% of uncompressed inode table size (13514459 bytes)\nDirectory table size 8123491 bytes (7933.10 Kbytes)\n\t42.95% of uncompressed directory table size (18912715 bytes)\nNumber of duplicate files found 31544\nNumber of inodes 328672\nNumber of files 232058\nNumber of fragments 4517\nNumber of symbolic links 59642\nNumber of device nodes 0\nNumber of fifo nodes 0\nNumber of socket nodes 4\nNumber of directories 36968\nNumber of hard-links 158829\nNumber of ids (unique uids + gids) 2\nNumber of uids 2\n\troot (0)\n\tbuilder (1000)\nNumber of gids 2\n\troot (0)\n\tbuilder (1000)\nroot_hash=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368'
++ printf $'%s\n' $'++ echo ci\n++ sudo -S ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img\nParallel mksquashfs: Using 4 processors\nCreating 4.0 filesystem on /home/builder/arasaka/build/rootfs.img, block size 1048576.\n\nExportable Squashfs 4.0 filesystem, zstd compressed, data block size 1048576\n\tcompressed data, compressed metadata, compressed fragments,\n\tno xattrs, compressed ids\n\tduplicates are removed\nFilesystem size 4318428.13 Kbytes (4217.21 Mbytes)\n\t32.03% of uncompressed filesystem size (13483956.79 Kbytes)\nInode table size 2951658 bytes (2882.48 Kbytes)\n\t21.84% of uncompressed inode table size (13514459 bytes)\nDirectory table size 8123491 bytes (7933.10 Kbytes)\n\t42.95% of uncompressed directory table size (18912715 bytes)\nNumber of duplicate files found 31544\nNumber of inodes 328672\nNumber of files 232058\nNumber of fragments 4517\nNumber of symbolic links 59642\nNumber of device nodes 0\nNumber of fifo nodes 0\nNumber of socket nodes 4\nNumber of directories 36968\nNumber of hard-links 158829\nNumber of ids (unique uids + gids) 2\nNumber of uids 2\n\troot (0)\n\tbuilder (1000)\nNumber of gids 2\n\troot (0)\n\tbuilder (1000)\nroot_hash=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368'
+++ printf $'%s\n' $'++ echo ci\n++ sudo -S ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img\nParallel mksquashfs: Using 4 processors\nCreating 4.0 filesystem on /home/builder/arasaka/build/rootfs.img, block size 1048576.\n\nExportable Squashfs 4.0 filesystem, zstd compressed, data block size 1048576\n\tcompressed data, compressed metadata, compressed fragments,\n\tno xattrs, compressed ids\n\tduplicates are removed\nFilesystem size 4318428.13 Kbytes (4217.21 Mbytes)\n\t32.03% of uncompressed filesystem size (13483956.79 Kbytes)\nInode table size 2951658 bytes (2882.48 Kbytes)\n\t21.84% of uncompressed inode table size (13514459 bytes)\nDirectory table size 8123491 bytes (7933.10 Kbytes)\n\t42.95% of uncompressed directory table size (18912715 bytes)\nNumber of duplicate files found 31544\nNumber of inodes 328672\nNumber of files 232058\nNumber of fragments 4517\nNumber of symbolic links 59642\nNumber of device nodes 0\nNumber of fifo nodes 0\nNumber of socket nodes 4\nNumber of directories 36968\nNumber of hard-links 158829\nNumber of ids (unique uids + gids) 2\nNumber of uids 2\n\troot (0)\n\tbuilder (1000)\nNumber of gids 2\n\troot (0)\n\tbuilder (1000)\nroot_hash=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368'
+++ sed -n 's/^root_hash=\(.*\)/\1/p'
+++ tr -d '\r'
++ ROOT_HASH='4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368'
+++ printf $'%s\n' $'++ echo ci\n++ sudo -S ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img\nParallel mksquashfs: Using 4 processors\nCreating 4.0 filesystem on /home/builder/arasaka/build/rootfs.img, block size 1048576.\n\nExportable Squashfs 4.0 filesystem, zstd compressed, data block size 1048576\n\tcompressed data, compressed metadata, compressed fragments,\n\tno xattrs, compressed ids\n\tduplicates are removed\nFilesystem size 4318428.13 Kbytes (4217.21 Mbytes)\n\t32.03% of uncompressed filesystem size (13483956.79 Kbytes)\nInode table size 2951658 bytes (2882.48 Kbytes)\n\t21.84% of uncompressed inode table size (13514459 bytes)\nDirectory table size 8123491 bytes (7933.10 Kbytes)\n\t42.95% of uncompressed directory table size (18912715 bytes)\nNumber of duplicate files found 31544\nNumber of inodes 328672\nNumber of files 232058\nNumber of fragments 4517\nNumber of symbolic links 59642\nNumber of device nodes 0\nNumber of fifo nodes 0\nNumber of socket nodes 4\nNumber of directories 36968\nNumber of hard-links 158829\nNumber of ids (unique uids + gids) 2\nNumber of uids 2\n\troot (0)\n\tbuilder (1000)\nNumber of gids 2\n\troot (0)\n\tbuilder (1000)\nroot_hash=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368'
+++ sed -n 's/^hash_offset=\(.*\)/\1/p'
+++ tr -d '\r'
++ HASH_OFFSET=
++ '[' -z '4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368' ']'
++ '[' -z '' ']'
+++ printf $'%s\n' $'++ echo ci\n++ sudo -S ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img\nParallel mksquashfs: Using 4 processors\nCreating 4.0 filesystem on /home/builder/arasaka/build/rootfs.img, block size 1048576.\n\nExportable Squashfs 4.0 filesystem, zstd compressed, data block size 1048576\n\tcompressed data, compressed metadata, compressed fragments,\n\tno xattrs, compressed ids\n\tduplicates are removed\nFilesystem size 4318428.13 Kbytes (4217.21 Mbytes)\n\t32.03% of uncompressed filesystem size (13483956.79 Kbytes)\nInode table size 2951658 bytes (2882.48 Kbytes)\n\t21.84% of uncompressed inode table size (13514459 bytes)\nDirectory table size 8123491 bytes (7933.10 Kbytes)\n\t42.95% of uncompressed directory table size (18912715 bytes)\nNumber of duplicate files found 31544\nNumber of inodes 328672\nNumber of files 232058\nNumber of fragments 4517\nNumber of symbolic links 59642\nNumber of device nodes 0\nNumber of fifo nodes 0\nNumber of socket nodes 4\nNumber of directories 36968\nNumber of hard-links 158829\nNumber of ids (unique uids + gids) 2\nNumber of uids 2\n\troot (0)\n\tbuilder (1000)\nNumber of gids 2\n\troot (0)\n\tbuilder (1000)\nroot_hash=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368'
+++ sed -n 's/^root_hash=\([^ ]*\) .*/\1/p'
++ ROOT_HASH=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179
+++ printf $'%s\n' $'++ echo ci\n++ sudo -S ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img\nParallel mksquashfs: Using 4 processors\nCreating 4.0 filesystem on /home/builder/arasaka/build/rootfs.img, block size 1048576.\n\nExportable Squashfs 4.0 filesystem, zstd compressed, data block size 1048576\n\tcompressed data, compressed metadata, compressed fragments,\n\tno xattrs, compressed ids\n\tduplicates are removed\nFilesystem size 4318428.13 Kbytes (4217.21 Mbytes)\n\t32.03% of uncompressed filesystem size (13483956.79 Kbytes)\nInode table size 2951658 bytes (2882.48 Kbytes)\n\t21.84% of uncompressed inode table size (13514459 bytes)\nDirectory table size 8123491 bytes (7933.10 Kbytes)\n\t42.95% of uncompressed directory table size (18912715 bytes)\nNumber of duplicate files found 31544\nNumber of inodes 328672\nNumber of files 232058\nNumber of fragments 4517\nNumber of symbolic links 59642\nNumber of device nodes 0\nNumber of fifo nodes 0\nNumber of socket nodes 4\nNumber of directories 36968\nNumber of hard-links 158829\nNumber of ids (unique uids + gids) 2\nNumber of uids 2\n\troot (0)\n\tbuilder (1000)\nNumber of gids 2\n\troot (0)\n\tbuilder (1000)\nroot_hash=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368'
+++ sed -n 's/.*hash_offset=\([^ ]*\)$/\1/p'
++ HASH_OFFSET=4422074368
++ '[' -z 4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 ']'
++ '[' -z 4422074368 ']'
++ log 'Verity root hash: 4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179'
+++ date +%H:%M:%S
++ echo '[bundle] 21:31:15 Verity root hash: 4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179'
++ log 'Hash offset:      4422074368'
+++ date +%H:%M:%S
++ echo '[bundle] 21:31:15 Hash offset:      4422074368'
++ run_quiet rm -rf /home/builder/arasaka/build/bundle-rootfs
++ echo ci
++ sudo -S rm -rf /home/builder/arasaka/build/bundle-rootfs
++ write_bundle
++ log 'Writing bundle directory + manifest...'
+++ date +%H:%M:%S
++ echo '[bundle] 21:31:26 Writing bundle directory + manifest...'
++ run_quiet rm -rf /home/builder/arasaka/build/bundle
++ echo ci
++ sudo -S rm -rf /home/builder/arasaka/build/bundle
++ mkdir -p /home/builder/arasaka/build/bundle
++ cat
++ run_quiet chmod +x /home/builder/arasaka/build/bundle/hook.sh
++ echo ci
++ sudo -S chmod +x /home/builder/arasaka/build/bundle/hook.sh
++ cat
++ run_quiet cp /home/builder/arasaka/build/rootfs.img /home/builder/arasaka/build/bundle/rootfs.img
++ echo ci
++ sudo -S cp /home/builder/arasaka/build/rootfs.img /home/builder/arasaka/build/bundle/rootfs.img
++ build_and_verify_bundle
++ local out
++ out=/home/builder/arasaka/build/arasaka-20260805.1.raucb
++ log 'Creating signed RAUC bundle: /home/builder/arasaka/build/arasaka-20260805.1.raucb'
+++ date +%H:%M:%S
++ echo '[bundle] 21:31:32 Creating signed RAUC bundle: /home/builder/arasaka/build/arasaka-20260805.1.raucb'
+++ dirname ./build-bundle.sh
++ run_verbose rauc bundle --cert=/tmp/ota/signing.crt --key=/tmp/ota/signing.key --signing-keyring=./config/rauc/ca.crt /home/builder/arasaka/build/bundle /home/builder/arasaka/build/arasaka-20260805.1.raucb
++ echo ci
++ sudo -S rauc bundle --cert=/tmp/ota/signing.crt --key=/tmp/ota/signing.key --signing-keyring=./config/rauc/ca.crt /home/builder/arasaka/build/bundle /home/builder/arasaka/build/arasaka-20260805.1.raucb
+rauc-Message: 21:32:31.782: Keyring given, doing signature verification
+rauc-Message: 21:32:31.782: Verified inline signature by 'O = Arasaka, CN = Arasaka OTA Signing'
++ log 'Verifying bundle against staged CA...'
+++ date +%H:%M:%S
++ echo '[bundle] 21:32:31 Verifying bundle against staged CA...'
+++ dirname ./build-bundle.sh
++ run_verbose rauc info --keyring=./config/rauc/ca.crt /home/builder/arasaka/build/arasaka-20260805.1.raucb
++ echo ci
++ sudo -S rauc info --keyring=./config/rauc/ca.crt /home/builder/arasaka/build/arasaka-20260805.1.raucb
+rauc-Message: 21:32:31.805: Reading bundle: /home/builder/arasaka/build/arasaka-20260805.1.raucb
+rauc-Message: 21:32:31.806: Verifying bundle signature... 
+rauc-Message: 21:32:31.807: Verified inline signature by 'O = Arasaka, CN = Arasaka OTA Signing'
++ log 'Bundle: /home/builder/arasaka/build/arasaka-20260805.1.raucb'
+++ date +%H:%M:%S
++ echo '[bundle] 21:32:31 Bundle: /home/builder/arasaka/build/arasaka-20260805.1.raucb'
++ echo /home/builder/arasaka/build/arasaka-20260805.1.raucb
++ log '=== Bundle build complete ==='
+++ date +%H:%M:%S
++ echo '[bundle] 21:32:31 === Bundle build complete ==='
++ log 'Bundle: /home/builder/arasaka/build/arasaka-20260805.1.raucb'
+++ date +%H:%M:%S
++ echo '[bundle] 21:32:31 Bundle: /home/builder/arasaka/build/arasaka-20260805.1.raucb'
++ log 'Next: upload to B2 updates bucket as update/stable/arasaka-20260805.1.raucb'
+++ date +%H:%M:%S
++ echo '[bundle] 21:32:31 Next: upload to B2 updates bucket as update/stable/arasaka-20260805.1.raucb'
++ log '      and publish update/stable/latest.json (+ .sig) pointing at it'
+++ date +%H:%M:%S
++ echo '[bundle] 21:32:31       and publish update/stable/latest.json (+ .sig) pointing at it'

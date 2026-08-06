@@ -1,0 +1,33 @@
+++ echo ci
+++ sudo -S ./scripts/make-verity-slot.sh /home/builder/arasaka/build/bundle-rootfs /home/builder/arasaka/build/rootfs.img
+Parallel mksquashfs: Using 4 processors
+Creating 4.0 filesystem on /home/builder/arasaka/build/rootfs.img, block size 1048576.
+
+Exportable Squashfs 4.0 filesystem, zstd compressed, data block size 1048576
+	compressed data, compressed metadata, compressed fragments,
+	no xattrs, compressed ids
+	duplicates are removed
+Filesystem size 4318428.13 Kbytes (4217.21 Mbytes)
+	32.03% of uncompressed filesystem size (13483956.79 Kbytes)
+Inode table size 2951658 bytes (2882.48 Kbytes)
+	21.84% of uncompressed inode table size (13514459 bytes)
+Directory table size 8123491 bytes (7933.10 Kbytes)
+	42.95% of uncompressed directory table size (18912715 bytes)
+Number of duplicate files found 31544
+Number of inodes 328672
+Number of files 232058
+Number of fragments 4517
+Number of symbolic links 59642
+Number of device nodes 0
+Number of fifo nodes 0
+Number of socket nodes 4
+Number of directories 36968
+Number of hard-links 158829
+Number of ids (unique uids + gids) 2
+Number of uids 2
+	root (0)
+	builder (1000)
+Number of gids 2
+	root (0)
+	builder (1000)
+root_hash=4883d8e3cf51f405bd9a040b7a2fe67e9a7faa67d78bd9066f82c25acc0dc179 hash_offset=4422074368
