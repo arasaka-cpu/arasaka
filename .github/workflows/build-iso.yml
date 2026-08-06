@@ -367,15 +367,18 @@ jobs:
               for chunk in iter(lambda: src.read(1 << 20), b""):
                   sha1.update(chunk)
 
-          # Replace any existing file with the same name: a failed earlier
-          # attempt may have already uploaded it, and b2_upload_file refuses
-          # duplicate names.
+          # Keep only one ISO in the bucket: the free-tier storage cap makes a
+          # second 5 GB ISO push the bucket over the limit (old + new + the
+          # GE-Proton assets), so any existing arasaka-*.iso MUST be deleted
+          # BEFORE the new ISO is uploaded. A failed upload therefore leaves no
+          # ISO behind — a fresh run will simply upload the new one.
           existing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
               f"{api_url}/b2api/v3/b2_list_file_names",
               "--data-binary", json.dumps({"bucketId": bucket_id,
-                                           "prefix": file_name})]))
+                                           "prefix": "arasaka-",
+                                           "maxFileCount": 1000})]))
           for f in existing.get("files", []):
-              print(f"replacing existing {f['fileName']} ({f['fileId']})")
+              print(f"removing old ISO {f['fileName']} ({f['fileId']})")
               curl_json(["-H", f"Authorization: {token}",
                   f"{api_url}/b2api/v3/b2_delete_file_version",
                   "--data-binary", json.dumps({"fileName": f["fileName"],
@@ -410,12 +413,14 @@ jobs:
           result = retry(do_upload)
           print(f"uploaded {file_name} ({result.get('contentLength')} bytes) fileId {result['fileId']}")
           
+          # Safety net: ensure only the newest ISO remains (should already be
+          # the case since we delete old ISOs before upload).
           listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
               f"{api_url}/b2api/v3/b2_list_file_names",
               "--data-binary", json.dumps({"bucketId": bucket_id, "prefix": "arasaka-",
                                            "maxFileCount": 1000})]))
           files = sorted(listing["files"], key=lambda f: f.get("uploadTimestamp", 0), reverse=True)
-          for f in files[2:]:
+          for f in files[1:]:
               print(f"removing old ISO {f['fileName']}")
               curl_json(["-H", f"Authorization: {token}",
                   f"{api_url}/b2api/v3/b2_delete_file_version",
