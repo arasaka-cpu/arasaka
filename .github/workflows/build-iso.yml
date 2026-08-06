@@ -555,6 +555,21 @@ jobs:
           replace_existing(bundle_name)
           retry(lambda: upload_file(BUNDLE, bundle_name))
 
+          # Keep only the newest OTA bundle. Bundle names are versioned, so
+          # they would otherwise accumulate in the bucket forever; the pointer
+          # only ever references the newest one, and old bundles are dead
+          # weight. Never delete the just-uploaded bundle.
+          listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
+              f"{api_url}/b2api/v3/b2_list_file_names",
+              "--data-binary", json.dumps({"bucketId": bucket_id, "prefix": PREFIX,
+                                           "maxFileCount": 1000})]))
+          bundles = [f for f in listing["files"] if f["fileName"].endswith(".raucb")]
+          for f in sorted(bundles, key=lambda f: f.get("uploadTimestamp", 0), reverse=True)[1:]:
+              print(f"removing old OTA bundle {f['fileName']}")
+              curl_json(["-H", f"Authorization: {token}",
+                  f"{api_url}/b2api/v3/b2_delete_file_version",
+                  "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})})
+
           for f in ("latest.json", "latest.json.sig"):
               b2_name = PREFIX + f
               replace_existing(b2_name)
