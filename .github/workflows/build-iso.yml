@@ -22,7 +22,7 @@ on:
     - cron: '17 4 * * 1'   # weekly Monday 04:17 UTC
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: arasaka-iso
@@ -291,6 +291,56 @@ jobs:
             "${GITHUB_WORKSPACE}/pointer/latest.json" \
             || echo "::warning::pointer self-check failed"
           cat "${GITHUB_WORKSPACE}/pointer/latest.json"
+
+      # Publish a rolling GitHub Release with the ISO, OTA bundle and the
+      # signed update pointer. Release assets are served from GitHub's object
+      # CDN (no artifact re-zip), so this gives devices a fast secondary
+      # source when B2's free egress cap is hit: arasaka-ota-update falls back
+      # to it via GH_OWNER_REPO/GH_RELEASE_TAG/SOURCE_ORDER in ota.conf.
+      - name: Publish rolling GitHub Release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RELEASE="rolling"
+          ASSETS=()
+          ISO=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso 2>/dev/null | head -1 || true)
+          [ -n "$ISO" ] && ASSETS+=("$ISO")
+          BUNDLE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.raucb 2>/dev/null | head -1 || true)
+          [ -n "$BUNDLE" ] && ASSETS+=("$BUNDLE")
+          for f in "${GITHUB_WORKSPACE}"/pointer/latest.json "${GITHUB_WORKSPACE}"/pointer/latest.json.sig; do
+            [ -f "$f" ] && ASSETS+=("$f")
+          done
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "no assets produced; skipping release publish"
+            exit 0
+          fi
+          # Create the rolling release on first build; reuse it afterwards.
+          # --latest=false keeps tagged stable releases on the "latest" slot.
+          if ! gh release view "$RELEASE" >/dev/null 2>&1; then
+            gh release create "$RELEASE" \
+              --target "$GITHUB_SHA" \
+              --title "Arasaka rolling build" \
+              --notes "Rolling build from ${GITHUB_REF_NAME} @ ${GITHUB_SHA:0:7}. ISO + OTA bundle + signed update pointer." \
+              --latest=false
+          fi
+          # Upload new assets first (--clobber replaces same-name assets),
+          # then prune stale ones (old dated ISO/bundle filenames) so the
+          # release always mirrors exactly this build.
+          for a in "${ASSETS[@]}"; do
+            gh release upload "$RELEASE" "$a" --clobber 2>/dev/null || gh release upload "$RELEASE" "$a"
+          done
+          TMPLIST=$(mktemp)
+          for a in "${ASSETS[@]}"; do basename "$a"; done | sort > "$TMPLIST"
+          gh release view "$RELEASE" --json assets -q '.assets[].name' 2>/dev/null | while read -r n; do
+            if [ -n "$n" ] && ! grep -qx "$n" "$TMPLIST"; then
+              echo "removing stale asset $n"
+              gh release delete-asset "$RELEASE" "$n" --yes || true
+            fi
+          done
+          rm -f "$TMPLIST"
+          echo "::notice::rolling release updated: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE}"
 
       # rclone's copy() does a HEAD check via the B2 *download* host, which
       # intermittently 403s from runner egress IPs (Unknown 403) and aborts the

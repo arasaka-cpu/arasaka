@@ -1350,14 +1350,21 @@ configure_rauc() {
     openssl x509 -in "$(dirname "$0")/config/rauc/signing.crt" -pubkey -noout \
         > "${tmpdir}/ota-pub.pem"
 
-    # OTA channel config: which bucket/channel the update client polls. The
-    # BASE_URL is the public read path for the arasaka-updates B2 bucket.
+    # OTA channel config: which sources the update client polls and in what
+    # order. BASE_URL is the public read path for the arasaka-updates B2
+    # bucket; GH_OWNER_REPO/GH_RELEASE_TAG point at the rolling GitHub Release
+    # that CI publishes alongside the B2 upload, so devices fall back to
+    # GitHub's fast CDN when B2's free egress cap is exhausted. SOURCE_ORDER
+    # lists the sources tried in order ("b2" and/or "gh").
     cat > "${tmpdir}/ota.conf" << OTAEOF
 # Arasaka OTA channel configuration
-CHANNEL=stable
+CHANNEL=${OTA_CHANNEL:-stable}
 BASE_URL=${OTA_BASE_URL:-https://f005.backblazeb2.com/file/arasaka-updates}
 B2_KEY_ID=${OTA_B2_KEY_ID:-}
 B2_KEY=${OTA_B2_KEY:-}
+GH_OWNER_REPO=${OTA_GH_OWNER_REPO:-arasaka-cpu/arasaka}
+GH_RELEASE_TAG=${OTA_GH_RELEASE_TAG:-rolling}
+SOURCE_ORDER=${OTA_SOURCE_ORDER:-b2 gh}
 OTAEOF
 
     run_quiet cp "${tmpdir}/ota-pub.pem" "${ROOTFS}/etc/arasaka/ota-pub.pem"

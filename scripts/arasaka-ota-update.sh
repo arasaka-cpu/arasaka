@@ -2,15 +2,24 @@
 # arasaka-ota-update.sh
 # Signed, immutable OTA update engine.
 #
-# Fetches the stable update pointer from the Arasaka B2 updates bucket,
-# verifies its signature against the baked-in OTA public key, downloads the
-# RAUC bundle, and installs it to the inactive A/B slot. The bundle itself is
-# a RAUC `verity` bundle: RAUC verifies its CMS signature against the trusted
-# keyring (/etc/rauc/keyring.pem) and checks the `compatible` string before
-# writing anything. Devices never contact Arch mirrors at runtime.
+# Fetches the stable update pointer, verifies its signature against the
+# baked-in OTA public key, downloads the RAUC bundle, and installs it to the
+# inactive A/B slot. The bundle itself is a RAUC `verity` bundle: RAUC verifies
+# its CMS signature against the trusted keyring (/etc/rauc/keyring.pem) and
+# checks the `compatible` string before writing anything. Devices never contact
+# Arch mirrors at runtime.
+#
+# Sources (SOURCE_ORDER in /etc/arasaka/ota.conf, default "b2 gh"):
+#   b2 - the Backblaze B2 updates bucket (public read path). Its free egress
+#        cap (~1 GB/day) can make downloads fail or crawl near the limit.
+#   gh - a rolling GitHub Release (the CI publishes the same bundle + pointer
+#        there). No auth needed for public releases and served from GitHub's
+#        fast CDN. Used when B2 is capped/unreachable.
+# The same signed pointer is published to both, so fallback is transparent.
 #
 # Flow:
 #   1. fetch <BASE>/update/<CHANNEL>/latest.json and latest.json.sig
+#      (fall back to the GitHub rolling release asset)
 #   2. verify the signature with /etc/arasaka/ota-pub.pem
 #   3. skip if the bundle version <= installed version
 #   4. fetch the referenced .raucb bundle and check its sha256
@@ -50,6 +59,11 @@ load_config() {
     BASE_URL="${BASE_URL:-}"
     B2_KEY_ID="${B2_KEY_ID:-}"
     B2_KEY="${B2_KEY:-}"
+    GH_OWNER_REPO="${GH_OWNER_REPO:-}"
+    GH_RELEASE_TAG="${GH_RELEASE_TAG:-rolling}"
+    # Sources tried in order; "b2" and/or "gh" may be listed (whitespace
+    # separated). Defaults to B2 first, GitHub rolling release as fallback.
+    SOURCE_ORDER="${SOURCE_ORDER:-b2 gh}"
     [ -n "$BASE_URL" ] || die "OTA_BASE_URL not set in $OTA_CONF"
     # Strip a trailing slash so URL joins below are clean.
     BASE_URL="${BASE_URL%/}"
@@ -62,6 +76,11 @@ curl_auth() {
     else
         curl -fsSL "$@"
     fi
+}
+
+gh_url() {
+    # GitHub rolling-release asset URL (public, no auth required).
+    echo "https://github.com/${GH_OWNER_REPO}/releases/download/${GH_RELEASE_TAG}/$1"
 }
 
 installed_version() {
@@ -78,14 +97,44 @@ version_newer() {
 }
 
 fetch_pointer() {
-    log "Fetching update pointer (channel=${CHANNEL})..."
+    log "Fetching update pointer (channel=${CHANNEL}, sources=[${SOURCE_ORDER}])..."
     mkdir -p "$CACHE_DIR"
-    curl_auth --retry 3 -o "${CACHE_DIR}/latest.json" \
-        "${BASE_URL}/update/${CHANNEL}/latest.json"
-    curl_auth --retry 3 -o "${CACHE_DIR}/latest.json.sig" \
-        "${BASE_URL}/update/${CHANNEL}/latest.json.sig"
-    [ -s "${CACHE_DIR}/latest.json" ] || die "empty latest.json"
-    [ -s "${CACHE_DIR}/latest.json.sig" ] || die "empty latest.json.sig"
+    local src
+    for src in ${SOURCE_ORDER}; do
+        if fetch_pointer_src "$src"; then
+            log "Pointer fetched from ${src}"
+            return 0
+        fi
+        log "Pointer fetch from ${src} failed; trying next source"
+        rm -f "${CACHE_DIR}/latest.json" "${CACHE_DIR}/latest.json.sig" 2>/dev/null || true
+    done
+    die "could not fetch update pointer from any source (${SOURCE_ORDER})"
+}
+
+fetch_pointer_src() {
+    local src="$1"
+    case "$src" in
+        b2)
+            curl_auth --retry 3 -o "${CACHE_DIR}/latest.json" \
+                "${BASE_URL}/update/${CHANNEL}/latest.json" || return 1
+            curl_auth --retry 3 -o "${CACHE_DIR}/latest.json.sig" \
+                "${BASE_URL}/update/${CHANNEL}/latest.json.sig" || return 1
+            ;;
+        gh)
+            [ -n "$GH_OWNER_REPO" ] || { log "gh source configured but GH_OWNER_REPO is empty"; return 1; }
+            curl -fsSL --retry 3 -o "${CACHE_DIR}/latest.json" \
+                "$(gh_url latest.json)" || return 1
+            curl -fsSL --retry 3 -o "${CACHE_DIR}/latest.json.sig" \
+                "$(gh_url latest.json.sig)" || return 1
+            ;;
+        *)
+            log "unknown source '${src}' in SOURCE_ORDER"
+            return 1
+            ;;
+    esac
+    [ -s "${CACHE_DIR}/latest.json" ] || return 1
+    [ -s "${CACHE_DIR}/latest.json.sig" ] || return 1
+    return 0
 }
 
 verify_pointer() {
@@ -109,7 +158,7 @@ PY
 }
 
 fetch_bundle() {
-    local bundle="$1" sha256="$2" size="$3" dest
+    local bundle="$1" sha256="$2" size="$3" dest src
     dest="${CACHE_DIR}/$(basename "$bundle")"
     if [ -s "$dest" ]; then
         local cur
@@ -121,10 +170,37 @@ fetch_bundle() {
         fi
     fi
     log "Downloading bundle ${bundle}..."
-    curl_auth --retry 3 --retry-delay 5 -o "${dest}.part" \
-        "${BASE_URL}/update/${CHANNEL}/${bundle}"
+    for src in ${SOURCE_ORDER}; do
+        if fetch_bundle_src "$src" "$bundle" "$dest"; then
+            log "Bundle downloaded from ${src}"
+            echo "$dest"
+            return 0
+        fi
+        rm -f "${dest}.part" 2>/dev/null || true
+        log "Bundle download from ${src} failed; trying next source"
+    done
+    die "could not download bundle ${bundle} from any source (${SOURCE_ORDER})"
+}
+
+fetch_bundle_src() {
+    local src="$1" bundle="$2" dest="$3"
+    case "$src" in
+        b2)
+            curl_auth --retry 3 --retry-delay 5 -o "${dest}.part" \
+                "${BASE_URL}/update/${CHANNEL}/${bundle}" || return 1
+            ;;
+        gh)
+            [ -n "$GH_OWNER_REPO" ] || return 1
+            curl -fsSL --retry 3 --retry-delay 5 -o "${dest}.part" \
+                "$(gh_url "$bundle")" || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [ -s "${dest}.part" ] || return 1
     mv -f "${dest}.part" "$dest"
-    echo "$dest"
+    return 0
 }
 
 verify_bundle() {
