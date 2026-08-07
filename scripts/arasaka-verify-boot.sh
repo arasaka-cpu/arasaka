@@ -10,7 +10,7 @@ BOOT_DIR="/boot"
 STATE_DIR="/data/rauc/boot"
 LOG_FILE="/var/log/arasaka-ota.log"
 
-log() { echo "[arasaka-verify] $*" | tee -a "$LOG_FILE"; }
+log() { echo "[arasaka-verify] $*" | tee -a "$LOG_FILE" 2>/dev/null || true; }
 
 booted_bootname() {
     # Extract rauc.slot=A|B from /proc/cmdline (written by the loader entries).

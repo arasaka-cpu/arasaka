@@ -1,5 +1,8 @@
 [Unit]
 Description=Arasaka RAUC mark slot good (confirm successful boot)
+# Only on an installed A/B boot (see arasaka-verify-boot.service): live ISO
+# has no slot to mark good and no /data for the strict sandbox.
+ConditionKernelCommandLine=rauc.slot
 After=display-manager.service systemd-user-sessions.service arasaka-verify-boot.service rauc.service
 RequiresMountsFor=/data
 

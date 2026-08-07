@@ -1091,6 +1091,12 @@ configure_live_autologin() {
     local LIVE_PW_HASH='$6$/Elg9RotmGAgGlOg$tcr.df/fx/i8lrHpsVC0g43F9ervTfY6.Uo75a0tFsFV2mpyIlkO6Spjff72gigUE1ov8k.qxvNztKLZ6Uxbq1'
 
     run arch-chroot "${ROOTFS}" /bin/bash -c '
+        # The AUR builds (calamares/snapd/findutils/system76-power) created a
+        # "builder" account with UID 1000 to run makepkg. It is a build-time
+        # leftover - its /home is gone - and it occupies UID 1000, which would
+        # make the useradd -u 1000 below fail silently and leave the live ISO
+        # without a usable "user" account (greetd -> USER_UNKNOWN -> boot hang).
+        id builder &>/dev/null && userdel builder 2>/dev/null || true
         useradd -m -u 1000 -g users -G wheel,video,render,audio,input,storage,power -s /usr/bin/zsh user 2>/dev/null || true
         # RESUME builds skip useradd (user exists) - grant render access anyway,
         # otherwise /dev/dri/renderD* (group render, 0660) is unusable and every

@@ -1,5 +1,10 @@
 [Unit]
 Description=Arasaka RAUC boot verification (kernel hash -> mark-bad)
+# Only meaningful on an installed A/B boot: the loader sets rauc.slot=, and
+# /data (with the recorded kernel hashes) exists. The live ISO has neither,
+# and the strict sandbox below cannot even be set up there (no /data mount
+# point), so gate on the kernel cmdline to skip it cleanly on live boots.
+ConditionKernelCommandLine=rauc.slot
 After=arasaka-persist-data.service rauc.service
 RequiresMountsFor=/data
 

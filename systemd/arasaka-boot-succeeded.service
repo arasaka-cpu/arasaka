@@ -1,5 +1,8 @@
 [Unit]
 Description=Arasaka A/B Boot Success (commit pending slot swap)
+# Only on an installed A/B boot (see arasaka-verify-boot.service): live ISO
+# has no /data for the strict sandbox.
+ConditionKernelCommandLine=rauc.slot
 After=display-manager.service systemd-user-sessions.service
 RequiresMountsFor=/boot
 
