@@ -326,7 +326,8 @@ jobs:
               for i in range(n):
                   try:
                       return fn()
-                  except (subprocess.CalledProcessError, json.JSONDecodeError):
+                  except (subprocess.CalledProcessError, json.JSONDecodeError,
+                          OSError, http.client.HTTPException):
                       if i == n - 1:
                           raise
                       time.sleep(delay)
@@ -475,7 +476,8 @@ jobs:
               for i in range(n):
                   try:
                       return fn()
-                  except (subprocess.CalledProcessError, json.JSONDecodeError):
+                  except (subprocess.CalledProcessError, json.JSONDecodeError,
+                          OSError, http.client.HTTPException):
                       if i == n - 1:
                           raise
                       time.sleep(delay)
