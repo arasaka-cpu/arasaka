@@ -306,7 +306,13 @@ jobs:
           RELEASE="rolling"
           ASSETS=()
           ISO=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso 2>/dev/null | head -1 || true)
-          [ -n "$ISO" ] && ASSETS+=("$ISO")
+          if [ -n "$ISO" ]; then
+            if [ "$(stat -c %s "$ISO" 2>/dev/null || echo 0)" -lt 2147483648 ]; then
+              ASSETS+=("$ISO")
+            else
+              echo "::warning::ISO $(basename "$ISO") exceeds GitHub's 2 GiB per-asset limit; skipping it on the release (still on B2 + Actions artifacts)"
+            fi
+          fi
           BUNDLE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.raucb 2>/dev/null | head -1 || true)
           [ -n "$BUNDLE" ] && ASSETS+=("$BUNDLE")
           for f in "${GITHUB_WORKSPACE}"/pointer/latest.json "${GITHUB_WORKSPACE}"/pointer/latest.json.sig; do
@@ -322,7 +328,7 @@ jobs:
             gh release create "$RELEASE" \
               --target "$GITHUB_SHA" \
               --title "Arasaka rolling build" \
-              --notes "Rolling build from ${GITHUB_REF_NAME} @ ${GITHUB_SHA:0:7}. ISO + OTA bundle + signed update pointer." \
+              --notes "Rolling build from ${GITHUB_REF_NAME} @ ${GITHUB_SHA:0:7}. OTA bundle + signed update pointer (ISO is on B2 + Actions artifacts if it exceeds GitHub's 2 GiB asset cap)." \
               --latest=false
           fi
           # Upload new assets first (--clobber replaces same-name assets),
