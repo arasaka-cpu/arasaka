@@ -14,7 +14,12 @@
 #        cap (~1 GB/day) can make downloads fail or crawl near the limit.
 #   gh - a rolling GitHub Release (the CI publishes the same bundle + pointer
 #        there). No auth needed for public releases and served from GitHub's
-#        fast CDN. Used when B2 is capped/unreachable.
+#        fast CDN.
+# Selection is AUTOMATIC - no user config: the last source that successfully
+# served an update moves to the front of SOURCE_ORDER for the next run, and a
+# download that stalls (throughput below the floor for too long) is aborted so
+# the next source is tried. A device that hits a capped B2 therefore flips to
+# GitHub by itself and stays there until GitHub fails too.
 # The same signed pointer is published to both, so fallback is transparent.
 #
 # Flow:
@@ -34,6 +39,14 @@ CACHE_DIR="/var/cache/arasaka-ota"
 OTA_CONF="/etc/arasaka/ota.conf"
 PUB_KEY="/etc/arasaka/ota-pub.pem"
 INSTALLED_VER_FILE="/etc/arasaka/version"
+# Last source that served an update. /var/cache lives on /data (persist-data
+# binds @cache), so this survives reboots and makes the flip stick.
+PREF_FILE="${CACHE_DIR}/.preferred-source"
+# Abort a download that averages less than this for this long (curl's
+# --speed-limit/--speed-time): a source crawling at KB/s is treated as
+# unusable and the next source is tried automatically.
+SPEED_LIMIT=20480
+SPEED_TIME=15
 
 log() { echo "[arasaka-ota] $(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"; }
 die() { log "FATAL: $*"; exit 1; }
@@ -63,6 +76,8 @@ load_config() {
     GH_RELEASE_TAG="${GH_RELEASE_TAG:-rolling}"
     # Sources tried in order; "b2" and/or "gh" may be listed (whitespace
     # separated). Defaults to B2 first, GitHub rolling release as fallback.
+    # The order is only a starting point: the last-good source is rotated to
+    # the front automatically, so this needs no user tuning.
     SOURCE_ORDER="${SOURCE_ORDER:-b2 gh}"
     [ -n "$BASE_URL" ] || die "OTA_BASE_URL not set in $OTA_CONF"
     # Strip a trailing slash so URL joins below are clean.
@@ -96,19 +111,51 @@ version_newer() {
     [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
 }
 
+ordered_sources() {
+    # AUTO source selection: rotate the last-good source to the front, keep the
+    # rest in configured order. First run uses SOURCE_ORDER as-is.
+    local preferred="" s
+    if [ -f "$PREF_FILE" ]; then
+        preferred=$(cat "$PREF_FILE" 2>/dev/null || true)
+        # Validate so a stale/corrupt file can't inject an unknown source.
+        case " ${SOURCE_ORDER} " in
+            *" ${preferred} "*) ;;
+            *) preferred="" ;;
+        esac
+    fi
+    if [ -z "$preferred" ]; then
+        echo "$SOURCE_ORDER"
+        return 0
+    fi
+    printf '%s' "$preferred"
+    for s in ${SOURCE_ORDER}; do
+        [ "$s" != "$preferred" ] && printf ' %s' "$s"
+    done
+    printf '\n'
+}
+
+mark_source() {
+    # Remember which source served this update so the next run tries it first.
+    mkdir -p "$CACHE_DIR"
+    echo "$1" > "$PREF_FILE" 2>/dev/null || true
+}
+
 fetch_pointer() {
-    log "Fetching update pointer (channel=${CHANNEL}, sources=[${SOURCE_ORDER}])..."
+    local order
+    order=$(ordered_sources)
+    log "Fetching update pointer (channel=${CHANNEL}, sources=[${order}])..."
     mkdir -p "$CACHE_DIR"
     local src
-    for src in ${SOURCE_ORDER}; do
+    for src in ${order}; do
         if fetch_pointer_src "$src"; then
+            mark_source "$src"
             log "Pointer fetched from ${src}"
             return 0
         fi
         log "Pointer fetch from ${src} failed; trying next source"
         rm -f "${CACHE_DIR}/latest.json" "${CACHE_DIR}/latest.json.sig" 2>/dev/null || true
     done
-    die "could not fetch update pointer from any source (${SOURCE_ORDER})"
+    die "could not fetch update pointer from any source (${order})"
 }
 
 fetch_pointer_src() {
@@ -158,7 +205,7 @@ PY
 }
 
 fetch_bundle() {
-    local bundle="$1" sha256="$2" size="$3" dest src
+    local bundle="$1" sha256="$2" size="$3" dest order src
     dest="${CACHE_DIR}/$(basename "$bundle")"
     if [ -s "$dest" ]; then
         local cur
@@ -169,9 +216,11 @@ fetch_bundle() {
             return 0
         fi
     fi
-    log "Downloading bundle ${bundle}..."
-    for src in ${SOURCE_ORDER}; do
+    order=$(ordered_sources)
+    log "Downloading bundle ${bundle} (sources=[${order}])..."
+    for src in ${order}; do
         if fetch_bundle_src "$src" "$bundle" "$dest"; then
+            mark_source "$src"
             log "Bundle downloaded from ${src}"
             echo "$dest"
             return 0
@@ -179,19 +228,23 @@ fetch_bundle() {
         rm -f "${dest}.part" 2>/dev/null || true
         log "Bundle download from ${src} failed; trying next source"
     done
-    die "could not download bundle ${bundle} from any source (${SOURCE_ORDER})"
+    die "could not download bundle ${bundle} from any source (${order})"
 }
 
 fetch_bundle_src() {
     local src="$1" bundle="$2" dest="$3"
     case "$src" in
         b2)
-            curl_auth --retry 3 --retry-delay 5 -o "${dest}.part" \
+            curl_auth --retry 3 --retry-delay 5 \
+                --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+                -o "${dest}.part" \
                 "${BASE_URL}/update/${CHANNEL}/${bundle}" || return 1
             ;;
         gh)
             [ -n "$GH_OWNER_REPO" ] || return 1
-            curl -fsSL --retry 3 --retry-delay 5 -o "${dest}.part" \
+            curl -fsSL --retry 3 --retry-delay 5 \
+                --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+                -o "${dest}.part" \
                 "$(gh_url "$bundle")" || return 1
             ;;
         *)

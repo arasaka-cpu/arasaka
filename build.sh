@@ -1355,7 +1355,9 @@ configure_rauc() {
     # bucket; GH_OWNER_REPO/GH_RELEASE_TAG point at the rolling GitHub Release
     # that CI publishes alongside the B2 upload, so devices fall back to
     # GitHub's fast CDN when B2's free egress cap is exhausted. SOURCE_ORDER
-    # lists the sources tried in order ("b2" and/or "gh").
+    # is only a starting point - the update script rotates the last-good
+    # source to the front and aborts crawling downloads, so devices flip to
+    # the fast source automatically with no user configuration.
     cat > "${tmpdir}/ota.conf" << OTAEOF
 # Arasaka OTA channel configuration
 CHANNEL=${OTA_CHANNEL:-stable}
