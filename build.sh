@@ -248,6 +248,12 @@ purge_pacman() {
     # only (AUR makepkg runs before this). Runs LAST, after cleanup() and every
     # configure_* / pacman transaction, so no later step needs pacman back.
     run arch-chroot "${ROOTFS}" /bin/bash -c '
+        # pacman 7.x ships "HoldPkg = pacman glibc" active in the default
+        # pacman.conf and prompts to confirm removal of HoldPkg packages even
+        # with --noconfirm (reading /dev/tty when present, stdin otherwise).
+        # Empty the list first so the purge is fully non-interactive.
+        sed -i "s/^HoldPkg[[:space:]]*=.*/HoldPkg =/" /etc/pacman.conf 2>/dev/null || true
+
         # Force-remove pacman (binaries + libalpm + makepkg). -dd skips the
         # dependency check; nothing in the immutable desktop links libalpm.
         pacman -Rdd --noconfirm pacman 2>/dev/null || true
