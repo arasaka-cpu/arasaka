@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # arasaka-verify-boot.sh
-# Verifies that the kernel/initramfs actually booted matches what was recorded
-# when the slot was made primary. If the kernel files on /boot were tampered
-# with or do not match the freshly-written rootfs slot, the slot is marked BAD
-# so RAUC/set-primary will not trust it.
+# Verifies that the Unified Kernel Image (UKI) actually booted matches what was
+# recorded when the slot was made primary. If the UKI on the ESP was tampered
+# with or does not match the freshly-written rootfs slot, the slot is marked
+# BAD so RAUC/set-primary will not trust it.
 set -euo pipefail
 
 BOOT_DIR="/boot"
@@ -12,14 +12,24 @@ LOG_FILE="/var/log/arasaka-ota.log"
 
 log() { echo "[arasaka-verify] $*" | tee -a "$LOG_FILE" 2>/dev/null || true; }
 
-booted_bootname() {
-    # Extract rauc.slot=A|B from /proc/cmdline (written by the loader entries).
-    for p in /proc/cmdline; do
-        if grep -q 'rauc\.slot=' "$p"; then
-            grep -o 'rauc\.slot=[A-Za-z0-9]*' "$p" | cut -d= -f2
+esp_dir() {
+    # The ESP mount root (fstab mounts it at /boot/efi on the Arasaka layout).
+    for d in "${BOOT_DIR}/efi" /efi "${BOOT_DIR}"; do
+        if [ -d "${d}/EFI/arasaka" ]; then
+            echo "$d"
             return 0
         fi
     done
+    echo "${BOOT_DIR}/efi"
+    return 0
+}
+
+booted_bootname() {
+    # Extract rauc.slot=A|B from /proc/cmdline (embedded in the UKI).
+    if grep -q 'rauc\.slot=' /proc/cmdline; then
+        grep -o 'rauc\.slot=[A-Za-z0-9]*' /proc/cmdline | cut -d= -f2
+        return 0
+    fi
     return 1
 }
 
@@ -32,35 +42,33 @@ slot_of_bootname() {
 }
 
 main() {
-    local bootname slot
+    local bootname slot esp
     bootname=$(booted_bootname) || { log "no rauc.slot in cmdline; skipping verify"; exit 0; }
     slot=$(slot_of_bootname "$bootname") || { log "unknown bootname $bootname"; exit 0; }
+    esp=$(esp_dir)
 
-    local expected_kernel expected_initrd
-    expected_kernel="${STATE_DIR}/${bootname}.kernel.sha256"
-    expected_initrd="${STATE_DIR}/${bootname}.initrd.sha256"
+    local uki="${esp}/EFI/arasaka/arasaka-${slot}.efi"
+    local expected="${STATE_DIR}/${bootname}.uki.sha256"
 
-    if [ ! -f "$expected_kernel" ]; then
-        # First boot after a fresh install: record the current kernel hashes
-        # so future boots have a baseline to compare against.
+    if [ ! -f "$expected" ]; then
+        # First boot after a fresh install: record the current UKI hash so
+        # future boots have a baseline to compare against.
         mkdir -p "$STATE_DIR"
-        sha256sum "${BOOT_DIR}/vmlinuz-arasaka-${slot}" 2>/dev/null | cut -d' ' -f1 > "$expected_kernel" || true
-        sha256sum "${BOOT_DIR}/initramfs-arasaka-${slot}.img" 2>/dev/null | cut -d' ' -f1 > "$expected_initrd" || true
-        log "Recorded baseline kernel hashes for slot $bootname"
+        sha256sum "$uki" 2>/dev/null | cut -d' ' -f1 > "$expected" || true
+        log "Recorded baseline UKI hash for slot $bootname"
         exit 0
     fi
 
-    local cur_kernel cur_initrd
-    cur_kernel=$(sha256sum "${BOOT_DIR}/vmlinuz-arasaka-${slot}" 2>/dev/null | cut -d' ' -f1 || true)
-    cur_initrd=$(sha256sum "${BOOT_DIR}/initramfs-arasaka-${slot}.img" 2>/dev/null | cut -d' ' -f1 || true)
+    local cur
+    cur=$(sha256sum "$uki" 2>/dev/null | cut -d' ' -f1 || true)
 
-    if [ "$cur_kernel" != "$(cat "$expected_kernel")" ] || [ "$cur_initrd" != "$(cat "$expected_initrd")" ]; then
-        log "KERNEL MISMATCH on slot $bootname - marking BAD"
+    if [ "$cur" != "$(cat "$expected")" ]; then
+        log "UKI MISMATCH on slot $bootname - marking BAD"
         rauc status mark-bad "$bootname" 2>&1 | tee -a "$LOG_FILE" || true
         exit 1
     fi
 
-    log "Kernel verified for slot $bootname"
+    log "UKI verified for slot $bootname"
     exit 0
 }
 

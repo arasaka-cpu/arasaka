@@ -1,6 +1,6 @@
 [Unit]
 Description=Arasaka Persistent Data (bind flatpak/snap/snapd + /etc state from /data)
-After=local-fs.target
+After=local-fs.target arasaka-cryptdata.service
 # Bind /home, the /var state dirs and the /etc runtime state (NetworkManager
 # connections, CUPS printers) in before the greeter/session and their consumers
 # start so nothing ever races with the bind mounts. Also before snapd, flatpak

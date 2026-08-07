@@ -98,17 +98,31 @@ version_of_rootfs() {
 
 write_canonical_fstab() {
     # The installed system mounts /boot and /boot/efi by stable filesystem
-    # label (set by the partitioner), /data by label, and /var/tmp as tmpfs
-    # (the root slot is read-only). UUIDs would break on OTA, since every
-    # bundle replaces the rootfs that carries fstab.
+    # label (set by the partitioner), /var/tmp as tmpfs (the root slot is
+    # read-only), and /data NOT at all - /data is encrypted LUKS2 (TPM2
+    # auto-unlock) and is brought up by arasaka-cryptdata + persist-data at
+    # runtime, so the fstab can never block boot if the TPM key is stale.
+    # UUIDs would break on OTA, since every bundle replaces the rootfs that
+    # carries fstab.
     cat > "${HARDENED}/etc/fstab" << 'FSTABEOF'
 # Arasaka fstab - systemd manages mounts
 /dev/disk/by-label/arasaka-boot    /boot           ext4    defaults,noatime 0 2
-/dev/disk/by-label/arasaka-data    /data           btrfs   defaults,noatime,compress=zstd,subvol=/ 0 1
 /dev/disk/by-label/EFI              /boot/efi       vfat    defaults,noatime 0 2
 tmpfs                               /var/tmp        tmpfs   defaults,noatime,mode=1777 0 0
 FSTABEOF
-    log "Wrote canonical fstab (label-based, OTA-stable)"
+
+    # crypttab for the encrypted /data partition. `noauto` means the unit is
+    # never auto-started at boot (a stale TPM key must not wedge boot in a
+    # passphrase prompt); arasaka-cryptdata.service brings the volume up
+    # explicitly - TPM2 first, then the recovery keyfile at
+    # /boot/ab/data-recovery.key - and re-seals the TPM policy.
+    mkdir -p "${HARDENED}/etc"
+    cat > "${HARDENED}/etc/crypttab" << 'CRYPTEOF'
+# Arasaka crypttab - /data is the only encrypted filesystem
+# TPM2 (PCR 7+11) auto-unlock; recovery keyfile fallback on stale policy.
+arasaka-data PARTLABEL=arasaka-data none noauto,tpm2-device=auto,keyfile-timeout=0
+CRYPTEOF
+    log "Wrote canonical fstab (label-based, OTA-stable; /data via crypttab/persist-data)"
 }
 
 prepare_hardened_rootfs() {

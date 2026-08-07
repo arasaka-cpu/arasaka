@@ -200,29 +200,43 @@ overlay_writable_dirs() {
     # upper/work dirs on the btrfs data partition, so user state survives
     # A/B updates (data is never rewritten). /etc is intentionally NOT
     # overlaid - it stays part of the immutable image. Never fails the
-    # boot - if /data is missing the system comes up fully read-only.
+    # boot - if /data is missing or encrypted (unlocked in userspace later)
+    # the system comes up fully read-only.
     local newroot="$1" datadev datamnt
-    datadev="$(find_data_partition)" || {
-        msg "Arasaka A/B: no data partition - /var stays read-only"
-        return 0
-    }
-    datamnt="${newroot}/data"
-    mkdir -p "$datamnt"
-    if ! mount -t btrfs -o compress=zstd "$datadev" "$datamnt" 2>/dev/null; then
-        msg "Arasaka A/B: could not mount data partition for overlays"
-        return 0
+    datadev="$(find_data_partition)" || datadev=""
+    if [ -n "$datadev" ]; then
+        datamnt="${newroot}/data"
+        mkdir -p "$datamnt"
+        if mount -t btrfs -o compress=zstd "$datadev" "$datamnt" 2>/dev/null; then
+            for d in var; do
+                mkdir -p "$datamnt/overlay/${d}-upper" "$datamnt/overlay/${d}-work"
+                if mount -t overlay overlay \
+                    -o "lowerdir=${newroot}/${d},upperdir=${datamnt}/overlay/${d}-upper,workdir=${datamnt}/overlay/${d}-work" \
+                    "${newroot}/${d}" 2>/dev/null; then
+                    msg "Arasaka A/B: overlayfs for /${d} (writable on /data)"
+                else
+                    msg "Arasaka A/B: WARNING - could not overlay /${d}; it stays read-only"
+                fi
+            done
+            return 0
+        fi
+        msg "Arasaka A/B: data partition not directly mountable (encrypted?) - using tmpfs /var"
     fi
 
-    for d in var; do
-        mkdir -p "$datamnt/overlay/${d}-upper" "$datamnt/overlay/${d}-work"
-        if mount -t overlay overlay \
-            -o "lowerdir=${newroot}/${d},upperdir=${datamnt}/overlay/${d}-upper,workdir=${datamnt}/overlay/${d}-work" \
-            "${newroot}/${d}" 2>/dev/null; then
-            msg "Arasaka A/B: overlayfs for /${d} (writable on /data)"
-        else
-            msg "Arasaka A/B: WARNING - could not overlay /${d}; it stays read-only"
-        fi
-    done
+    # /data unavailable in the initramfs (LUKS /data is unlocked by
+    # systemd-cryptsetup in userspace). Give the ro root a writable /var on
+    # tmpfs so early boot (journald, ...) works; arasaka-persist-data binds
+    # the persistent subvols in from /data a moment later.
+    mkdir -p /run/var-upper /run/var-work
+    mount -t tmpfs tmpfs /run/var-upper 2>/dev/null || true
+    mount -t tmpfs tmpfs /run/var-work 2>/dev/null || true
+    if mount -t overlay overlay \
+        -o "lowerdir=${newroot}/var,upperdir=/run/var-upper,workdir=/run/var-work" \
+        "${newroot}/var" 2>/dev/null; then
+        msg "Arasaka A/B: overlayfs for /var (tmpfs, persists after persist-data binds)"
+    else
+        msg "Arasaka A/B: WARNING - could not overlay /var; it stays read-only"
+    fi
     return 0
 }
 

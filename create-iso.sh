@@ -239,6 +239,10 @@ bash
 sudo
 git
 base-devel
+sbctl
+systemd-ukify
+sbsigntools
+tpm2-tools
 PKGEOF
 }
 
@@ -271,7 +275,7 @@ build_bootloader() {
 
     wtee "${ISO_DIR}/loader/loader.conf" >/dev/null << 'LOADEREOF'
 default arasaka.conf
-timeout 5
+timeout 0
 console-mode auto
 editor no
 LOADEREOF
@@ -386,7 +390,7 @@ build_efiboot() {
     mkdir -p "${tmpdir}/loader/entries"
     wtee "${tmpdir}/loader/loader.conf" >/dev/null << 'LOADEREOF'
 default arasaka.conf
-timeout 5
+timeout 0
 console-mode auto
 editor no
 LOADEREOF

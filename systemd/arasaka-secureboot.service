@@ -1,0 +1,16 @@
+[Unit]
+Description=Arasaka Secure Boot key enrollment and ESP signing
+# Keys are generated at install and stored on /data; persist-data binds them
+# over /etc + /usr/share/secureboot/keys before this runs. Never blocks boot:
+# a machine that was already enrolled (normal case) is just verified and left
+# alone.
+After=arasaka-persist-data.service
+Before=display-manager.service cosmic-greeter.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arasaka-secureboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

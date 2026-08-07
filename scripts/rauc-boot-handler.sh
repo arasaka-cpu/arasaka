@@ -13,10 +13,11 @@
 #
 # Slot switching:
 #   - systemd-boot picks its boot entry from loader.conf `default`.
-#   - Each slot has its OWN kernel/initramfs on the shared /boot partition
-#     (vmlinuz-arasaka-a / initramfs-arasaka-a.img, ...). Switching primary
-#     extracts the kernel+initramfs from the freshly-written rootfs slot and
-#     copies them into /boot per-slot, atomically (.tmp + rename).
+#   - Each slot has its OWN Unified Kernel Image on the ESP
+#     (/boot/efi/EFI/arasaka/arasaka-<slot>.efi). Switching primary extracts the
+#     kernel+initramfs from the freshly-written rootfs slot, builds a UKI with
+#     ukify, signs it with sbctl using the db key persisted on /data, and
+#     installs it atomically (.tmp + rename).
 #   - Kernel cmdline carries rauc.slot=A/B so RAUC can detect the booted slot.
 #
 # Slots are RAW squashfs+dm-verity images (no filesystem, no label), so they
@@ -38,8 +39,16 @@ set -euo pipefail
 
 BOOT_LABEL="arasaka-boot"
 BOOT_DIR="/boot"
+# The ESP holds the UKIs + loader entries. /boot/efi is the fstab mount for the
+# ESP on the Arasaka layout; /efi and /boot (when /boot is itself the ESP) are
+# fallbacks for hand-rolled layouts.
+EFI_DIR="${BOOT_DIR}/efi"
+[ -d "${EFI_DIR}/EFI" ] || EFI_DIR="/efi"
+[ -d "${EFI_DIR}/EFI" ] || EFI_DIR="${BOOT_DIR}"
+ESP_LOADER_DIR="${EFI_DIR}/loader"
+UKI_DIR="${EFI_DIR}/EFI/arasaka"
 LOADER_CONF="${BOOT_DIR}/loader/loader.conf"
-ENTRIES_DIR="${BOOT_DIR}/loader/entries"
+ENTRIES_DIR="${ESP_LOADER_DIR}/entries"
 AB_DIR="${BOOT_DIR}/ab"
 STATE_DIR="/data/rauc/boot"
 # Scratch dir for kernel extraction. /data is mounted before rauc.service runs
@@ -125,11 +134,12 @@ slot_device() { # slot letter (a|b) -> block device (partlabel first)
     fi
 }
 
-copy_kernel_from_slot() {
-    # Extract the kernel+initramfs from the freshly-written rootfs slot into
-    # /boot using per-slot names, written atomically. The slot is a raw
+build_uki_from_slot() {
+    # Extract the kernel+initramfs from the freshly-written rootfs slot, build
+    # a UKI for it, and install it on the ESP at
+    # /EFI/arasaka/arasaka-<slot>.efi (signed, atomically). The slot is a raw
     # squashfs image (no filesystem to mount), so it is read with unsquashfs.
-    local slot="$1" bootname="$2" dev kname imgname tmpk tmpi
+    local slot="$1" bootname="$2" dev kname imgname tmpuki signed uki cmdline
     dev=$(slot_device "${slot}") || die "slot device for '${slot}' not found"
     [ -b "${dev}" ] || die "slot device ${dev} not found"
 
@@ -151,12 +161,45 @@ copy_kernel_from_slot() {
     unsquashfs -quiet -no-progress -n -f -d "${MNT}" "${dev}" \
         "boot/${kname}" "boot/${imgname}" || die "cannot extract kernel from slot ${slot}"
 
-    tmpk="${BOOT_DIR}/vmlinuz-arasaka-${slot}.tmp"
-    tmpi="${BOOT_DIR}/initramfs-arasaka-${slot}.img.tmp"
-    cp "${MNT}/boot/${kname}" "${tmpk}"
-    cp "${MNT}/boot/${imgname}" "${tmpi}"
-    mv -f "${tmpk}" "${BOOT_DIR}/vmlinuz-arasaka-${slot}"
-    mv -f "${tmpi}" "${BOOT_DIR}/initramfs-arasaka-${slot}.img"
+    cmdline="root=PARTLABEL=arasaka-slot-${slot} ro rauc.slot=${bootname}"
+    tmpuki="${UKI_DIR}/arasaka-${slot}.efi.tmp"
+    uki="${UKI_DIR}/arasaka-${slot}.efi"
+    mkdir -p "${UKI_DIR}"
+    if command -v ukify >/dev/null 2>&1; then
+        UKIFY=$(command -v ukify)
+    elif [ -x /usr/lib/systemd/ukify ]; then
+        UKIFY=/usr/lib/systemd/ukify
+    else
+        die "ukify not found (is systemd-ukify installed?)"
+    fi
+    "${UKIFY}" build \
+        --linux="${MNT}/boot/${kname}" \
+        --initrd="${MNT}/boot/${imgname}" \
+        --cmdline="${cmdline}" \
+        --os-release="${MNT}/etc/os-release" \
+        --output="${tmpuki}" || die "ukify build failed for slot ${slot}"
+
+    # Sign with the persisted db key if present (bound by persist-data); an
+    # unsigned UKI is still functional, just not Secure Boot enforced.
+    if [ -f /usr/share/secureboot/keys/db/db.key ] || [ -f /etc/secureboot/keys/db/db.key ]; then
+        signed="${tmpuki}.signed"
+        if sbctl sign --output "${signed}" "${tmpuki}" 2>/dev/null; then
+            mv -f "${signed}" "${uki}"
+            log "signed UKI installed for slot ${slot}"
+        else
+            log "WARNING: sbctl sign failed for slot ${slot}; installing unsigned UKI"
+            mv -f "${tmpuki}" "${uki}"
+        fi
+    else
+        mv -f "${tmpuki}" "${uki}"
+    fi
+
+    # Write the loader entry (UKI type) on the ESP.
+    mkdir -p "${ENTRIES_DIR}"
+    cat > "${ENTRIES_DIR}/arasaka-${slot}.conf" << EOEOF
+title   Arasaka (Slot ${bootname})
+efi     /EFI/arasaka/arasaka-${slot}.efi
+EOEOF
 
     # Ensure a per-device machine-id exists on /boot (the initramfs binds it
     # over the slot's baked /etc/machine-id). The bundle's post-install hook
@@ -196,16 +239,15 @@ cmd_set_primary() {
         exit 0
     fi
 
-    # 1. Extract the kernel from the new rootfs slot into /boot.
-    copy_kernel_from_slot "${slot}" "${bootname}"
+    # 1. Extract the kernel from the new rootfs slot and install a signed UKI
+    #    for it on the ESP.
+    build_uki_from_slot "${slot}" "${bootname}"
 
-    # 2. Record the freshly-extracted kernel hashes so arasaka-verify-boot
-    #    can prove the kernels that actually boot match what we installed.
+    # 2. Record the freshly-built UKI hash so arasaka-verify-boot can prove the
+    #    UKI that actually boots matches what we installed.
     ensure_state
-    sha256sum "${BOOT_DIR}/vmlinuz-arasaka-${slot}" | cut -d' ' -f1 \
-        > "${STATE_DIR}/${bootname}.kernel.sha256"
-    sha256sum "${BOOT_DIR}/initramfs-arasaka-${slot}.img" | cut -d' ' -f1 \
-        > "${STATE_DIR}/${bootname}.initrd.sha256"
+    sha256sum "${UKI_DIR}/arasaka-${slot}.efi" | cut -d' ' -f1 \
+        > "${STATE_DIR}/${bootname}.uki.sha256"
 
     # 3. Point systemd-boot at the new slot's entry.
     set_loader_default "arasaka-${slot}.conf"

@@ -4,9 +4,16 @@
 # system state (flatpak, snap, snapd, systemd, log, cache, home) into the
 # running root. The rootfs slots are immutable, so all writable user-facing
 # state lives on /data and survives OTA slot swaps.
+#
+# /data is the ONE encrypted filesystem on the system (LUKS2, TPM2 auto-unlock
+# via systemd-cryptsetup; the A/B root slots are raw squashfs+dm-verity images
+# that RAUC dd-writes, so they cannot be LUKS). arasaka-cryptdata.service
+# unlocks it before this unit runs; the mapper path is tried first and the
+# by-label path remains only as the legacy/unencrypted fallback.
 set -euo pipefail
 
-DATA_DEV="/dev/disk/by-label/arasaka-data"
+DATA_DEV="/dev/mapper/arasaka-data"
+DATA_DEV_FALLBACK="/dev/disk/by-label/arasaka-data"
 DATA_MNT="/data"
 # btrfs subvolumes on the data partition (created by install-to-disk.sh) bound
 # into the running root so user state survives OTA slot swaps.
@@ -26,13 +33,16 @@ mount_data() {
     if mountpoint -q "${DATA_MNT}"; then
         return 0
     fi
-    if [ ! -b "${DATA_DEV}" ]; then
-        log "WARNING: data partition ${DATA_DEV} not found; using volatile state"
+    local dev=""
+    [ -b "${DATA_DEV}" ] && dev="${DATA_DEV}"
+    [ -z "$dev" ] && [ -b "${DATA_DEV_FALLBACK}" ] && dev="${DATA_DEV_FALLBACK}"
+    if [ -z "$dev" ]; then
+        log "WARNING: data partition (${DATA_DEV} / ${DATA_DEV_FALLBACK}) not found; using volatile state"
         return 1
     fi
     mkdir -p "${DATA_MNT}"
-    mount -t btrfs -o compress=zstd "${DATA_DEV}" "${DATA_MNT}" 2>/dev/null \
-        || mount "${DATA_DEV}" "${DATA_MNT}"
+    mount -t btrfs -o compress=zstd "${dev}" "${DATA_MNT}" 2>/dev/null \
+        || mount "${dev}" "${DATA_MNT}"
     log "Data partition mounted at ${DATA_MNT}"
 }
 
@@ -72,10 +82,27 @@ bind_etc_state() {
     done
 }
 
+bind_secureboot_keys() {
+    # Secure Boot signing keys (db key/cert) are generated at install time and
+    # stored on the encrypted /data partition; the RAUC boot handler signs the
+    # freshly-built UKI with them on every slot switch, and sbctl reads them
+    # from /etc/secureboot/keys (older sbctl: /usr/share/secureboot/keys).
+    # Bind both candidate paths over the ro slot's /etc + /usr.
+    mkdir -p "${DATA_MNT}/secureboot/keys"
+    for target in /etc/secureboot/keys /usr/share/secureboot/keys; do
+        mkdir -p "${target}"
+        if ! mountpoint -q "${target}"; then
+            mount --bind "${DATA_MNT}/secureboot/keys" "${target}" 2>/dev/null \
+                && log "Bound ${DATA_MNT}/secureboot/keys -> ${target}"
+        fi
+    done
+}
+
 main() {
     log "Ensuring persistent state on /data..."
     if mount_data; then
         ensure_subvols
+        bind_secureboot_keys
         bind_state
         bind_etc_state
     fi

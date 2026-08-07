@@ -1,0 +1,19 @@
+[Unit]
+Description=Arasaka /data LUKS unlock (TPM2 auto / recovery key)
+# Runs after the boot filesystems are up (recovery key lives on /boot) and
+# before persist-data (which mounts /data). Not required by any target: if
+# /data cannot be unlocked the system must still come up (degraded, volatile
+# state) so the user can recover - hence no Requires/After on cryptsetup that
+# would fail sysinit.
+DefaultDependencies=no
+After=cryptsetup.target local-fs.target
+Before=arasaka-persist-data.service
+ConditionPathExists=/dev/disk/by-partlabel/arasaka-data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arasaka-cryptdata.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

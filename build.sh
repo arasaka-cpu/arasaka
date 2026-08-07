@@ -123,6 +123,10 @@ strap() {
         rauc \
         desync \
         cryptsetup \
+        sbctl \
+        systemd-ukify \
+        sbsigntools \
+        tpm2-tools \
         cups \
         foomatic-db \
         ghostscript \
@@ -234,6 +238,32 @@ purge_gnu_coreutils() {
     '
 
     log "GNU coreutils + findutils eliminated. All hail uutils."
+}
+
+purge_pacman() {
+    log "PURGING pacman - the final image ships NO package manager..."
+    # A desktop that ships immutable read-only slots + zero privilege escalation
+    # has no reason to keep pacman: it would be the single biggest "make the
+    # system mutable" primitive on the device. Everything here is build-time
+    # only (AUR makepkg runs before this). Runs LAST, after cleanup() and every
+    # configure_* / pacman transaction, so no later step needs pacman back.
+    run arch-chroot "${ROOTFS}" /bin/bash -c '
+        # Force-remove pacman (binaries + libalpm + makepkg). -dd skips the
+        # dependency check; nothing in the immutable desktop links libalpm.
+        pacman -Rdd --noconfirm pacman 2>/dev/null || true
+
+        # Drop every package-manager artifact (db, cache, keyring, config).
+        rm -rf /var/lib/pacman /var/cache/pacman /etc/pacman.conf /etc/pacman.d \
+               /etc/makepkg.conf /etc/makepkg.d /usr/share/libalpm \
+               /var/log/pacman.log 2>/dev/null || true
+
+        # The AUR build account (makepkg) is build-time only; no unit or script
+        # on the installed system references it.
+        userdel -r builder 2>/dev/null || true
+
+        [ ! -e /usr/bin/pacman ] && echo "pacman purge complete (verified gone)"
+    '
+    log "pacman + libalpm + makepkg removed from the final image"
 }
 
 build_aur_calamares() {
@@ -1463,11 +1493,20 @@ copy_services() {
         systemctl enable arasaka-update.timer 2>/dev/null || true
         systemctl enable arasaka-reboot-after-update.timer 2>/dev/null || true
         systemctl enable arasaka-boot-succeeded.service 2>/dev/null || true
+        systemctl enable arasaka-cryptdata.service 2>/dev/null || true
         systemctl enable arasaka-persist-data.service 2>/dev/null || true
+        systemctl enable arasaka-secureboot.service 2>/dev/null || true
         systemctl enable arasaka-verify-boot.service 2>/dev/null || true
         systemctl enable arasaka-rauc-mark-good.service 2>/dev/null || true
         systemctl enable arasaka-remount-ro.service 2>/dev/null || true
     ' || true
+
+    # Mountpoints for the Secure Boot signing keys bound from /data at runtime
+    # (persist-data binds /data/secureboot/keys over these). The slot root is
+    # read-only, so the directories must already exist inside the image for the
+    # bind mounts to land.
+    run_quiet mkdir -p "${ROOTFS}/etc/secureboot/keys" \
+                 "${ROOTFS}/usr/share/secureboot/keys"
 }
 
 cleanup() {
@@ -1590,6 +1629,7 @@ main() {
     configure_plymouth
     configure_system76_power
     cleanup
+    purge_pacman
     build_image
     log "=== Build complete ==="
     log "Rootfs: ${ROOTFS}"

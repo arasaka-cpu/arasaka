@@ -17,10 +17,15 @@ fi
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)/build"
 ROOTFS="${BUILD_DIR}/rootfs"
 
-log() { echo "[disk-installer] $*"; }
+log() { echo "[disk-installer] $*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
 
 [ -n "$PASSWORD" ] || die "Set ARASAKA_SUDO_PASSWORD or create build.conf (see build.conf.example)"
+
+# Recovery passphrase for the LUKS2 /data partition (generated once, printed at
+# the end, and stored at /boot/ab/data-recovery.key on the installed system so
+# systemd-cryptsetup can fall back to it if the TPM2 key goes stale).
+RECOVERY_PASS=""
 
 usage() {
     cat << 'EOF'
@@ -39,7 +44,16 @@ Disk layout:
   Partition 2: Boot (1GB, ext4)
   Partition 3: Slot A root (20GB, raw squashfs + dm-verity image)
   Partition 4: Slot B root (20GB, same)
-  Partition 5: Data (remaining, btrfs - /home, /var/lib/flatpak, etc.)
+  Partition 5: Data (remaining, btrfs inside LUKS2 - /home, /var/lib/flatpak, etc.)
+
+Security:
+  - /data is encrypted (LUKS2). It auto-unlocks with the machine's TPM2
+    (PCR 7+11); the recovery passphrase printed at the end is the fallback.
+  - The installed system boots Unified Kernel Images (kernel + initramfs +
+    cmdline in one PE) signed with an Arasaka Secure Boot key (sbctl keys
+    stored on the encrypted /data partition). Enable Secure Boot in the
+    firmware after install; the first boot enrolls the keys automatically.
+  - Boot menu is hidden (timeout 0) and the interactive editor is disabled.
 EOF
     exit 1
 }
@@ -87,7 +101,12 @@ partition_disk() {
     # Partition 4: Slot B (20GB)
     echo "$PASSWORD" | sudo -S sgdisk --new=4:0:+20G --typecode=4:8300 --change-name=4:"arasaka-slot-b" "$target"
 
-    # Partition 5: Data (remaining)
+    # Partition 5: Data (remaining). LUKS2-encrypted btrfs: this is the ONLY
+    # encrypted filesystem on the system. The A/B root slots are raw squashfs
+    # + dm-verity images written verbatim by RAUC/installers, so they cannot be
+    # LUKS; /data holds all user state (home, flatpak, snap, var) instead. It
+    # auto-unlocks at boot with the machine's TPM2 key (sealed by
+    # arasaka-cryptdata on first boot) with the recovery passphrase as fallback.
     echo "$PASSWORD" | sudo -S sgdisk --new=5:0:0 --typecode=5:8300 --change-name=5:"arasaka-data" "$target"
 
     # Get partition naming
@@ -116,7 +135,17 @@ partition_disk() {
     echo "$PASSWORD" | sudo -S mkfs.ext2 -L arasaka-boot "$p2"
     echo "$PASSWORD" | sudo -S mkfs.ext4 -L arasaka-slot-a "$p3"
     echo "$PASSWORD" | sudo -S mkfs.ext4 -L arasaka-slot-b "$p4"
-    echo "$PASSWORD" | sudo -S mkfs.btrfs -f -L arasaka-data "$p5"
+
+    log "Encrypting data partition (LUKS2)..."
+    RECOVERY_PASS="$(openssl rand -hex 16)"
+    local keyfile
+    keyfile="$(mktemp)"
+    printf '%s' "${RECOVERY_PASS}" > "$keyfile"
+    chmod 400 "$keyfile"
+    echo "$PASSWORD" | sudo -S cryptsetup luksFormat --type luks2 -q "$p5" "$keyfile"
+    echo "$PASSWORD" | sudo -S cryptsetup open "$p5" arasaka-data -d "$keyfile"
+    echo "$PASSWORD" | sudo -S mkfs.btrfs -f -L arasaka-data /dev/mapper/arasaka-data
+    rm -f "$keyfile"
 
     echo "$p1" "$p2" "$p3" "$p4" "$p5"
 }
@@ -137,9 +166,9 @@ install_rootfs() {
     sudo mkdir -p "${mnt}/slot-a"
     sudo mount "$p3" "${mnt}/slot-a"
 
-    # Mount data partition
+    # Mount data partition (the LUKS2 mapper created by partition_disk)
     sudo mkdir -p "${mnt}/data"
-    sudo mount "$p5" "${mnt}/data"
+    sudo mount /dev/mapper/arasaka-data "${mnt}/data"
 
     # Initialize data partition subvolumes
     log "Creating data partition subvolumes..."
@@ -194,44 +223,49 @@ install_rootfs() {
 
     sudo bootctl --esp-path="${mnt}/boot-efi" --boot-path="${mnt}/boot" install
 
-    # Create loader config
-    sudo tee "${mnt}/boot/loader/loader.conf" >/dev/null << LEOF
+    # Create loader config on the ESP (sd-boot's primary location) and mirror
+    # it to /boot for setups where /boot is an XBOOTLDR partition. Boot entries
+    # are UKI-based and written after the UKIs are built below.
+    sudo mkdir -p "${mnt}/boot-efi/loader"
+    sudo tee "${mnt}/boot-efi/loader/loader.conf" >/dev/null << LEOF
 default arasaka-a.conf
-timeout 3
+timeout 0
 console-mode auto
 editor no
 LEOF
-
-    # Slot A boot entry (per-slot kernel). The slot root is mounted read-only
-    # by the arasaka-ab initramfs hook; `ro` here is only the degraded fallback
-    # cmdline. PARTLABEL works for both a fresh ext4 slot and a verity-protected
-    # squashfs slot; rauc.slot tells RAUC which slot actually booted.
-    sudo tee "${mnt}/boot/loader/entries/arasaka-a.conf" >/dev/null << AEOF
-title   Arasaka (Slot A)
-linux   /vmlinuz-arasaka-a
-initrd  /initramfs-arasaka-a.img
-options root=PARTLABEL=arasaka-slot-a ro rauc.slot=A
-AEOF
-
-    # Slot B boot entry (per-slot kernel)
-    sudo tee "${mnt}/boot/loader/entries/arasaka-b.conf" >/dev/null << BEOF
-title   Arasaka (Slot B)
-linux   /vmlinuz-arasaka-b
-initrd  /initramfs-arasaka-b.img
-options root=PARTLABEL=arasaka-slot-b ro rauc.slot=B
-BEOF
-
-    # Kernel for the boot loader (per-slot names). The RAUC boot handler
-    # re-extracts kernel+initramfs from a freshly-written slot on every
-    # set-primary, keeping them in lockstep with the slot content.
-    sudo cp "${ROOTFS}/boot/${kname}" "${mnt}/boot/vmlinuz-arasaka-a" 2>/dev/null || \
-        sudo cp /boot/${kname} "${mnt}/boot/vmlinuz-arasaka-a" 2>/dev/null || \
-        sudo cp /boot/vmlinuz-linux "${mnt}/boot/vmlinuz-arasaka-a"
-    sudo cp "${mnt}/boot/vmlinuz-arasaka-a" "${mnt}/boot/vmlinuz-arasaka-b" 2>/dev/null || true
+    sudo mkdir -p "${mnt}/boot/loader"
+    sudo cp "${mnt}/boot-efi/loader/loader.conf" "${mnt}/boot/loader/loader.conf"
 
     # Set initial active slot (markers live on the writable /boot partition)
     sudo mkdir -p "${mnt}/boot/ab"
     echo "a" | sudo tee "${mnt}/boot/ab/active-slot" >/dev/null
+
+    # Copy the LUKS recovery key for the encrypted /data partition. The
+    # arasaka-cryptdata unit falls back to this key when TPM unsealing fails.
+    sudo mkdir -p "${mnt}/boot/ab"
+    printf '%s' "${RECOVERY_PASS}" | sudo tee "${mnt}/boot/ab/data-recovery.key" >/dev/null
+    sudo chmod 400 "${mnt}/boot/ab/data-recovery.key"
+
+    # Generate the Secure Boot signing keys once and persist them on the
+    # encrypted /data partition so they survive slot swaps (sbctl installs
+    # them under either /etc or /usr/share/secureboot/keys depending on
+    # version). The systemd-boot binary on the ESP is enrolled/signed on
+    # first boot by arasaka-secureboot.service.
+    log "Generating Secure Boot signing keys..."
+    sudo sbctl create-keys || log "WARN: sbctl create-keys failed (will retry on first boot)"
+    local keys_dir
+    keys_dir=""
+    for d in /etc/secureboot/keys /usr/share/secureboot/keys; do
+        if [ -d "$d" ]; then
+            keys_dir="$d"
+            break
+        fi
+    done
+    if [ -n "$keys_dir" ]; then
+        sudo mkdir -p "${mnt}/data/secureboot"
+        sudo rm -rf "${mnt}/data/secureboot/keys"
+        sudo cp -a "$keys_dir" "${mnt}/data/secureboot/keys"
+    fi
 
     # Create fstab for the installed system. /boot stays writable (A/B swap
     # markers + kernel extraction); /var/tmp is tmpfs because the root slot is
@@ -242,10 +276,18 @@ BEOF
     sudo tee "${mnt}/slot-a/etc/fstab" >/dev/null << FSTABEOF
 # Arasaka fstab - systemd manages mounts
 /dev/disk/by-label/arasaka-boot    /boot           ext4    defaults,noatime 0 2
-/dev/disk/by-label/arasaka-data    /data           btrfs   defaults,noatime,compress=zstd,subvol=/ 0 1
 /dev/disk/by-label/EFI              /boot/efi       vfat    defaults,noatime 0 2
 tmpfs                               /var/tmp        tmpfs   defaults,noatime,mode=1777 0 0
 FSTABEOF
+
+    # /data is LUKS2-encrypted with TPM-based unlocking (recovery key on
+    # /boot/ab as fallback). arasaka-cryptdata.service (a systemd crypttab
+    # unit) opens it in the initramfs/early-boot path; it is intentionally NOT
+    # in fstab so a locked volume never blocks the boot.
+    sudo tee "${mnt}/slot-a/etc/crypttab" >/dev/null << CRYPTEOF
+# Arasaka - LUKS2 /data unlocked via TPM2 (see arasaka-cryptdata.service)
+arasaka-data    PARTLABEL=arasaka-data    none    noauto,tpm2-device=auto,keyfile-timeout=0
+CRYPTEOF
 
     # Copy install scripts to the installed system
     sudo cp "$(dirname "$0")/scripts/"*.sh "${mnt}/slot-a/usr/local/bin/" 2>/dev/null || true
@@ -270,12 +312,44 @@ FSTABEOF
     done
     if sudo chroot "${mnt}/slot-a" /usr/bin/mkinitcpio -P; then
         log "initramfs regenerated"
-        sudo cp "${mnt}/slot-a/boot/${imgname}" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || \
-            sudo cp "${mnt}/slot-a/boot/initramfs-linux.img" "${mnt}/boot/initramfs-arasaka-a.img" 2>/dev/null || true
-        sudo cp "${mnt}/boot/initramfs-arasaka-a.img" "${mnt}/boot/initramfs-arasaka-b.img" 2>/dev/null || true
     else
         die "initramfs regeneration failed; aborting (a fresh install must ship the A/B + dm-verity initramfs)"
     fi
+
+    # Build a signed Unified Kernel Image (UKI) per slot on the ESP. The UKI
+    # embeds kernel + initramfs + cmdline + os-release in one PE file, so a
+    # signed UKI is the Secure Boot root of trust: the EFI stub, kernel,
+    # initramfs and cmdline are all covered by one signature. rauc-boot-handler
+    # rebuilds these on every set-primary.
+    log "Building Unified Kernel Images (UKI)..."
+    local uki_dir kpath ipath uki tmp_uki slot_upper slot_lower
+    uki_dir="${mnt}/boot-efi/EFI/arasaka"
+    sudo mkdir -p "${uki_dir}" "${mnt}/boot-efi/loader/entries"
+    kpath="${mnt}/slot-a/boot/${kname}"
+    ipath="${mnt}/slot-a/boot/${imgname}"
+    [ -f "$kpath" ] || kpath="${mnt}/slot-a/boot/vmlinuz-linux"
+    [ -f "$ipath" ] || ipath="${mnt}/slot-a/boot/initramfs-linux.img"
+    for slot_upper in A B; do
+        slot_lower="$(echo "$slot_upper" | tr 'A-Z' 'a-z')"
+        tmp_uki="${uki_dir}/arasaka-${slot_lower}.efi.unsigned"
+        sudo /usr/lib/systemd/ukify build \
+            --linux="$kpath" \
+            --initrd="$ipath" \
+            --cmdline="root=PARTLABEL=arasaka-slot-${slot_lower} ro rauc.slot=${slot_upper}" \
+            --os-release="${mnt}/slot-a/etc/os-release" \
+            --output="$tmp_uki" || die "ukify build failed for slot ${slot_upper}"
+        if [ -n "$keys_dir" ]; then
+            sudo sbctl sign --output "${uki_dir}/arasaka-${slot_lower}.efi" "$tmp_uki" \
+                || log "WARN: sbctl sign failed for slot ${slot_upper} (Secure Boot signing deferred to first boot)"
+        else
+            sudo mv "$tmp_uki" "${uki_dir}/arasaka-${slot_lower}.efi"
+        fi
+        sudo rm -f "$tmp_uki"
+        sudo tee "${mnt}/boot-efi/loader/entries/arasaka-${slot_lower}.conf" >/dev/null << EOEOF
+title   Arasaka (Slot ${slot_upper})
+efi     /EFI/arasaka/arasaka-${slot_lower}.efi
+EOEOF
+    done
 
     # Per-device machine-id on /boot (the slots are read-only squashfs shared
     # across devices; the arasaka-ab hook binds this over /etc/machine-id).
@@ -321,10 +395,10 @@ FSTABEOF
     sudo cp "${conf}" "${mnt}/boot/ab/verity-b.conf"
     sudo rm -f "${img}" "${conf}"
 
-    # Record the kernel/initramfs baseline for slot A (RAUC state dir lives on
-    # the data partition; arasaka-verify-boot compares these at boot).
-    sha256sum "${mnt}/boot/vmlinuz-arasaka-a" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.kernel.sha256" >/dev/null
-    sha256sum "${mnt}/boot/initramfs-arasaka-a.img" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.initrd.sha256" >/dev/null
+    # Record the UKI baseline for slot A (RAUC state dir lives on the data
+    # partition; arasaka-verify-boot compares these at boot).
+    sha256sum "${mnt}/boot-efi/EFI/arasaka/arasaka-a.efi" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/A.uki.sha256" >/dev/null
+    sha256sum "${mnt}/boot-efi/EFI/arasaka/arasaka-b.efi" | cut -d' ' -f1 | sudo tee "${mnt}/data/rauc/boot/B.uki.sha256" >/dev/null
 
     # Unmount everything
     log "Unmounting..."
@@ -336,6 +410,14 @@ FSTABEOF
     log "Installation complete!"
     log "Slot A is active. System will boot into COSMIC desktop."
     log "Updates are automatic via systemd timer."
+    log ""
+    log "IMPORTANT: /data recovery passphrase (store this somewhere safe; it is"
+    log "also at /boot/ab/data-recovery.key on the installed system):"
+    log "    ${RECOVERY_PASS}"
+    log ""
+    log "Secure Boot: signing keys were generated and stored on the encrypted"
+    log "/data partition. Enable Secure Boot in the firmware; the first boot"
+    log "enrolls the keys automatically (Setup Mode)."
 }
 
 main() {
