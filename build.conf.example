@@ -1,3 +1,13 @@
 # Copy this file to build.conf and fill in your local values.
 # build.conf is gitignored and must never be committed to the repo.
 ARASAKA_SUDO_PASSWORD="change-me"
+
+# Optional OTA channel overrides (see build.sh generate_ota_config).
+# OTA_BASE_URL      public read path of the B2 updates bucket (default set in build.sh)
+# OTA_B2_KEY_ID     B2 app key for a private updates bucket (empty = public read)
+# OTA_B2_KEY        matching application key
+# OTA_GH_OWNER_REPO rolling release repo, e.g. arasaka-cpu/arasaka
+# OTA_GH_RELEASE_TAG rolling release tag, e.g. rolling
+# OTA_IA_BASE_URL   Internet Archive mirror, e.g. https://archive.org/download/arasaka-ota
+# OTA_SOURCE_ORDER  whitespace-separated list, default "b2 gh ia"
+# OTA_CHANNEL       update channel, default stable

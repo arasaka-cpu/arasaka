@@ -9,12 +9,15 @@
 # checks the `compatible` string before writing anything. Devices never contact
 # Arch mirrors at runtime.
 #
-# Sources (SOURCE_ORDER in /etc/arasaka/ota.conf, default "b2 gh"):
+# Sources (SOURCE_ORDER in /etc/arasaka/ota.conf, default "b2 gh ia"):
 #   b2 - the Backblaze B2 updates bucket (public read path). Its free egress
 #        cap (~1 GB/day) can make downloads fail or crawl near the limit.
 #   gh - a rolling GitHub Release (the CI publishes the same bundle + pointer
 #        there). No auth needed for public releases and served from GitHub's
 #        fast CDN.
+#   ia - an Internet Archive item (the CI mirrors the bundle + signed pointer
+#        there). Archive.org tolerates datacenter egress the way GitHub's CDN
+#        sometimes does not, and is effectively free/unmetered.
 # Selection is AUTOMATIC - no user config: the last source that successfully
 # served an update moves to the front of SOURCE_ORDER for the next run, and a
 # download that stalls (throughput below the floor for too long) is aborted so
@@ -77,14 +80,20 @@ load_config() {
     B2_KEY="${B2_KEY:-}"
     GH_OWNER_REPO="${GH_OWNER_REPO:-}"
     GH_RELEASE_TAG="${GH_RELEASE_TAG:-rolling}"
-    # Sources tried in order; "b2" and/or "gh" may be listed (whitespace
-    # separated). Defaults to B2 first, GitHub rolling release as fallback.
-    # The order is only a starting point: the last-good source is rotated to
-    # the front automatically, so this needs no user tuning.
-    SOURCE_ORDER="${SOURCE_ORDER:-b2 gh}"
+    IA_BASE_URL="${IA_BASE_URL:-}"
+    # Sources tried in order; "b2", "gh" and/or "ia" may be listed (whitespace
+    # separated). Defaults to B2 first, then GitHub rolling release, then
+    # Internet Archive. The order is only a starting point: the last-good
+    # source is rotated to the front automatically, so this needs no user
+    # tuning. An empty IA_BASE_URL disables the ia source.
+    SOURCE_ORDER="${SOURCE_ORDER:-b2 gh ia}"
+    if [ -z "$IA_BASE_URL" ]; then
+        SOURCE_ORDER=$(echo "$SOURCE_ORDER" | tr ' ' '\n' | grep -v '^ia$' | tr '\n' ' ')
+    fi
     [ -n "$BASE_URL" ] || die "OTA_BASE_URL not set in $OTA_CONF"
-    # Strip a trailing slash so URL joins below are clean.
+    # Strip trailing slashes so URL joins below are clean.
     BASE_URL="${BASE_URL%/}"
+    IA_BASE_URL="${IA_BASE_URL%/}"
 }
 
 curl_auth() {
@@ -99,6 +108,11 @@ curl_auth() {
 gh_url() {
     # GitHub rolling-release asset URL (public, no auth required).
     echo "https://github.com/${GH_OWNER_REPO}/releases/download/${GH_RELEASE_TAG}/$1"
+}
+
+ia_url() {
+    # Internet Archive item file URL (public, no auth required).
+    echo "${IA_BASE_URL}/$1"
 }
 
 installed_version() {
@@ -176,6 +190,13 @@ fetch_pointer_src() {
                 "$(gh_url latest.json)" || return 1
             curl -fsSL --retry 3 -o "${CACHE_DIR}/latest.json.sig" \
                 "$(gh_url latest.json.sig)" || return 1
+            ;;
+        ia)
+            [ -n "$IA_BASE_URL" ] || { log "ia source configured but IA_BASE_URL is empty"; return 1; }
+            curl -fsSL --retry 3 -o "${CACHE_DIR}/latest.json" \
+                "$(ia_url latest.json)" || return 1
+            curl -fsSL --retry 3 -o "${CACHE_DIR}/latest.json.sig" \
+                "$(ia_url latest.json.sig)" || return 1
             ;;
         *)
             log "unknown source '${src}' in SOURCE_ORDER"
@@ -277,6 +298,14 @@ fetch_bundle_src() {
                     -o "${dest}.part" \
                     "$(gh_url "$bundle")" || return 1
             fi
+            ;;
+        ia)
+            [ -n "$IA_BASE_URL" ] || return 1
+            # Single-file mirror, no chunking (Archive.org has no 2 GiB cap).
+            curl -fsSL --retry 3 --retry-delay 5 \
+                --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+                -o "${dest}.part" \
+                "$(ia_url "$bundle")" || return 1
             ;;
         *)
             return 1

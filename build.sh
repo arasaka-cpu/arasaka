@@ -1399,10 +1399,12 @@ configure_rauc() {
     # order. BASE_URL is the public read path for the arasaka-updates B2
     # bucket; GH_OWNER_REPO/GH_RELEASE_TAG point at the rolling GitHub Release
     # that CI publishes alongside the B2 upload, so devices fall back to
-    # GitHub's fast CDN when B2's free egress cap is exhausted. SOURCE_ORDER
-    # is only a starting point - the update script rotates the last-good
-    # source to the front and aborts crawling downloads, so devices flip to
-    # the fast source automatically with no user configuration.
+    # GitHub's fast CDN when B2's free egress cap is exhausted; IA_BASE_URL
+    # points at an Internet Archive item mirroring the same bundle + pointer.
+    # SOURCE_ORDER is only a starting point - the update script rotates the
+    # last-good source to the front and aborts crawling downloads, so devices
+    # flip to the fast source automatically with no user configuration. An
+    # empty IA_BASE_URL disables the ia source on the device.
     cat > "${tmpdir}/ota.conf" << OTAEOF
 # Arasaka OTA channel configuration
 CHANNEL=${OTA_CHANNEL:-stable}
@@ -1411,7 +1413,8 @@ B2_KEY_ID=${OTA_B2_KEY_ID:-}
 B2_KEY=${OTA_B2_KEY:-}
 GH_OWNER_REPO=${OTA_GH_OWNER_REPO:-arasaka-cpu/arasaka}
 GH_RELEASE_TAG=${OTA_GH_RELEASE_TAG:-rolling}
-SOURCE_ORDER=${OTA_SOURCE_ORDER:-b2 gh}
+IA_BASE_URL=${OTA_IA_BASE_URL:-}
+SOURCE_ORDER=${OTA_SOURCE_ORDER:-b2 gh ia}
 OTAEOF
 
     run_quiet cp "${tmpdir}/ota-pub.pem" "${ROOTFS}/etc/arasaka/ota-pub.pem"
