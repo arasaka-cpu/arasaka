@@ -294,6 +294,38 @@ build_aur_calamares() {
     run_quiet cp "${srcdir}"/PKGBUILD "${srcdir}"/0001-*.patch "${ROOTFS}/home/builder/calamares/" 2>/dev/null
     run arch-chroot "${ROOTFS}" chown -R builder:builder /home/builder
 
+    # Pre-fetch the Calamares source tarball: makepkg downloads it single-shot
+    # with no retry, and it lives on codeberg.org which intermittently stalls
+    # from runner egress IPs (this failed in CI once as a silent exit 1 under
+    # run()'s stderr suppression). Sourcing the PKGBUILD gives us the exact
+    # filename/URL/checksum so this can't drift from it. If the file already
+    # exists makepkg will reuse it (resume builds).
+    run_verbose arch-chroot "${ROOTFS}" sudo -u builder bash -c '
+        set -e
+        cd /home/builder/calamares
+        . ./PKGBUILD
+        _ext="$url/releases/download/v$pkgver/$_pkgname-$pkgver.$_pkgext"
+        _file="$_pkgname-$pkgver.$_pkgext"
+        _want="${sha256sums[0]}"
+        if [ -s "$_file" ]; then
+            echo "calamares source already present; skipping pre-fetch"
+        else
+            ok=0
+            for i in 1 2 3 4 5; do
+                echo "pre-fetching $_file (attempt $i/5)..."
+                if curl -fL --retry 3 --retry-delay 5 -o "$_file.part" "$_ext" \
+                    && printf "%s  %s\n" "$_want" "$_file.part" | sha256sum -c - >/dev/null 2>&1; then
+                    mv "$_file.part" "$_file"
+                    ok=1
+                    break
+                fi
+                rm -f "$_file.part"
+                sleep 10
+            done
+            [ "$ok" -eq 1 ] || { echo "FATAL: failed to fetch $_file from $_ext"; exit 1; }
+        fi
+    '
+
     run arch-chroot "${ROOTFS}" sudo -u builder bash -c \
         'cd /home/builder/calamares && makepkg --noconfirm --force'
     run arch-chroot "${ROOTFS}" bash -c \
