@@ -304,25 +304,32 @@ build_aur_calamares() {
         set -e
         cd /home/builder/calamares
         . ./PKGBUILD
-        _ext="$url/releases/download/v$pkgver/$_pkgname-$pkgver.$_pkgext"
         _file="$_pkgname-$pkgver.$_pkgext"
         _want="${sha256sums[0]}"
+        # codeberg/nginx resets HTTP/2 streams mid-transfer (curl 92) for large
+        # files from runner IPs; forcing HTTP/1.1 avoids it entirely. Resume
+        # partial downloads and retry all errors across attempts.
+        _urls=("$url/releases/download/v$pkgver/$_pkgname-$pkgver.$_pkgext")
         if [ -s "$_file" ]; then
             echo "calamares source already present; skipping pre-fetch"
         else
             ok=0
-            for i in 1 2 3 4 5; do
-                echo "pre-fetching $_file (attempt $i/5)..."
-                if curl -fL --retry 3 --retry-delay 5 -o "$_file.part" "$_ext" \
-                    && printf "%s  %s\n" "$_want" "$_file.part" | sha256sum -c - >/dev/null 2>&1; then
-                    mv "$_file.part" "$_file"
-                    ok=1
-                    break
-                fi
-                rm -f "$_file.part"
-                sleep 10
+            for i in 1 2 3; do
+                echo "pre-fetching $_file (attempt $i/3)..."
+                for u in "${_urls[@]}"; do
+                    echo "  source: $u"
+                    if curl -fL --http1.1 -C - --retry 8 --retry-delay 5 --retry-all-errors \
+                            -o "$_file.part" "$u" \
+                        && printf "%s  %s\n" "$_want" "$_file.part" | sha256sum -c - >/dev/null 2>&1; then
+                        mv "$_file.part" "$_file"
+                        ok=1
+                        break 2
+                    fi
+                    rm -f "$_file.part"
+                done
+                sleep 5
             done
-            [ "$ok" -eq 1 ] || { echo "FATAL: failed to fetch $_file from $_ext"; exit 1; }
+            [ "$ok" -eq 1 ] || { echo "FATAL: failed to fetch $_file from codeberg/github mirrors"; exit 1; }
         fi
     '
 
