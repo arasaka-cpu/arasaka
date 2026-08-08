@@ -304,22 +304,50 @@ jobs:
         run: |
           set -euo pipefail
           RELEASE="rolling"
-          ASSETS=()
+          # GitHub Releases caps each asset at 2 GiB (total release size is
+          # unlimited), and the ISO/rootfs are already squashfs-compressed, so
+          # re-compressing won't fit. Oversized files are split into 1 GiB
+          # parts plus a "<name>.parts.json" manifest; the OTA client
+          # reassembles chunks from the gh source automatically (and humans
+          # can cat the ISO parts back together).
+          MAX_ASSET=2147483648
+          CHUNK=1073741824
+          UPLOAD=()
+          CANDIDATES=()
           ISO=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso 2>/dev/null | head -1 || true)
-          if [ -n "$ISO" ]; then
-            if [ "$(stat -c %s "$ISO" 2>/dev/null || echo 0)" -lt 2147483648 ]; then
-              ASSETS+=("$ISO")
-            else
-              echo "::warning::ISO $(basename "$ISO") exceeds GitHub's 2 GiB per-asset limit; skipping it on the release (still on B2 + Actions artifacts)"
-            fi
-          fi
+          [ -n "$ISO" ] && CANDIDATES+=("$ISO")
           BUNDLE=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.raucb 2>/dev/null | head -1 || true)
-          [ -n "$BUNDLE" ] && ASSETS+=("$BUNDLE")
+          [ -n "$BUNDLE" ] && CANDIDATES+=("$BUNDLE")
           for f in "${GITHUB_WORKSPACE}"/pointer/latest.json "${GITHUB_WORKSPACE}"/pointer/latest.json.sig; do
-            [ -f "$f" ] && ASSETS+=("$f")
+            [ -f "$f" ] && CANDIDATES+=("$f")
           done
-          if [ "${#ASSETS[@]}" -eq 0 ]; then
+          PARTS_DIR=$(mktemp -d)
+          for f in "${CANDIDATES[@]}"; do
+            name=$(basename "$f")
+            size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+            if [ "$size" -lt "$MAX_ASSET" ]; then
+              UPLOAD+=("$f")
+            else
+              echo "::notice::${name} is ${size} bytes (>= 2 GiB GitHub cap); uploading as 1 GiB parts + manifest"
+              split -b "$CHUNK" -d -a 2 "$f" "${PARTS_DIR}/${name}.part."
+              sha=$(sha256sum "$f" | cut -d' ' -f1)
+              manifest="${PARTS_DIR}/${name}.parts.json"
+              printf '{"file":"%s","total":%s,"sha256":"%s","parts":[' "$name" "$size" "$sha" > "$manifest"
+              first=1
+              for p in "${PARTS_DIR}/${name}".part.*; do
+                [ -e "$p" ] || continue
+                [ "$first" -eq 0 ] && printf ',' >> "$manifest"
+                printf '"%s"' "$(basename "$p")" >> "$manifest"
+                first=0
+                UPLOAD+=("$p")
+              done
+              printf ']}\n' >> "$manifest"
+              UPLOAD+=("$manifest")
+            fi
+          done
+          if [ "${#UPLOAD[@]}" -eq 0 ]; then
             echo "no assets produced; skipping release publish"
+            rm -rf "$PARTS_DIR"
             exit 0
           fi
           # Create the rolling release on first build; reuse it afterwards.
@@ -328,17 +356,17 @@ jobs:
             gh release create "$RELEASE" \
               --target "$GITHUB_SHA" \
               --title "Arasaka rolling build" \
-              --notes "Rolling build from ${GITHUB_REF_NAME} @ ${GITHUB_SHA:0:7}. OTA bundle + signed update pointer (ISO is on B2 + Actions artifacts if it exceeds GitHub's 2 GiB asset cap)." \
+              --notes "Rolling build from ${GITHUB_REF_NAME} @ ${GITHUB_SHA:0:7}. OTA bundle + signed update pointer. Files over GitHub's 2 GiB cap are split into 1 GiB .partNN files plus a .parts.json manifest (cat the parts back together for the ISO)." \
               --latest=false
           fi
           # Upload new assets first (--clobber replaces same-name assets),
           # then prune stale ones (old dated ISO/bundle filenames) so the
           # release always mirrors exactly this build.
-          for a in "${ASSETS[@]}"; do
+          for a in "${UPLOAD[@]}"; do
             gh release upload "$RELEASE" "$a" --clobber 2>/dev/null || gh release upload "$RELEASE" "$a"
           done
           TMPLIST=$(mktemp)
-          for a in "${ASSETS[@]}"; do basename "$a"; done | sort > "$TMPLIST"
+          for a in "${UPLOAD[@]}"; do basename "$a"; done | sort > "$TMPLIST"
           gh release view "$RELEASE" --json assets -q '.assets[].name' 2>/dev/null | while read -r n; do
             if [ -n "$n" ] && ! grep -qx "$n" "$TMPLIST"; then
               echo "removing stale asset $n"
@@ -346,6 +374,7 @@ jobs:
             fi
           done
           rm -f "$TMPLIST"
+          rm -rf "$PARTS_DIR"
           echo "::notice::rolling release updated: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE}"
 
       # rclone's copy() does a HEAD check via the B2 *download* host, which

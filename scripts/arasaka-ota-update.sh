@@ -28,6 +28,9 @@
 #   2. verify the signature with /etc/arasaka/ota-pub.pem
 #   3. skip if the bundle version <= installed version
 #   4. fetch the referenced .raucb bundle and check its sha256
+#      (on the gh source, bundles over GitHub's 2 GiB asset cap are split into
+#      1 GiB .partNN files + a <bundle>.parts.json manifest; this script
+#      downloads the parts and concatenates them automatically)
 #   5. rauc install (verifies the bundle signature + compatible string)
 #   6. mark a reboot (handled by arasaka-reboot-after-update)
 #
@@ -242,10 +245,38 @@ fetch_bundle_src() {
             ;;
         gh)
             [ -n "$GH_OWNER_REPO" ] || return 1
-            curl -fsSL --retry 3 --retry-delay 5 \
-                --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
-                -o "${dest}.part" \
-                "$(gh_url "$bundle")" || return 1
+            # Fast path: single asset. Fallback path: chunked parts + manifest
+            # (GitHub caps one asset at 2 GiB, so the CI splits bigger bundles
+            # into 1 GiB .partNN files plus a <bundle>.parts.json manifest).
+            # The manifest lists part names + total size; parts are byte ranges
+            # of the original, so concatenation restores it exactly.
+            if curl -fsSL --retry 2 -o "${dest}.parts.json" \
+                    "$(gh_url "${bundle}.parts.json")" 2>/dev/null \
+                    && [ -s "${dest}.parts.json" ]; then
+                local total part_list p
+                total=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["total"])' "${dest}.parts.json") || { rm -f "${dest}.parts.json"; return 1; }
+                part_list=$(python3 -c 'import json,sys;print("\n".join(json.load(open(sys.argv[1]))["parts"]))' "${dest}.parts.json") || { rm -f "${dest}.parts.json"; return 1; }
+                : > "${dest}.part"
+                for p in ${part_list}; do
+                    curl -fsSL --retry 3 --retry-delay 5 \
+                        --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+                        -o "${dest}.chunk" "$(gh_url "$p")" || { rm -f "${dest}.part" "${dest}.parts.json" "${dest}.chunk"; return 1; }
+                    cat "${dest}.chunk" >> "${dest}.part"
+                    rm -f "${dest}.chunk"
+                done
+                rm -f "${dest}.parts.json"
+                if [ "$(stat -c %s "${dest}.part" 2>/dev/null || echo 0)" != "$total" ]; then
+                    log "chunked bundle size mismatch (expected ${total})"
+                    rm -f "${dest}.part"
+                    return 1
+                fi
+            else
+                rm -f "${dest}.parts.json"
+                curl -fsSL --retry 3 --retry-delay 5 \
+                    --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+                    -o "${dest}.part" \
+                    "$(gh_url "$bundle")" || return 1
+            fi
             ;;
         *)
             return 1
