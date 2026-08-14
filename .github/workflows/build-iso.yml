@@ -15,6 +15,9 @@
 # Required repo secrets: B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET
 #                        B2_UPDATES_APPLICATION_KEY_ID, B2_UPDATES_APPLICATION_KEY, B2_UPDATES_BUCKET
 #                        OTA_SIGNING_KEY, OTA_SIGNING_CERT
+#                        IA_S3_ACCESS_KEY, IA_S3_SECRET_KEY (vars: IA_ITEM)
+#                        -> IA secrets enable the archive.org mirror; without
+#                        them the IA mirror step is a no-op.
 
 name: Build Arasaka ISO
 
@@ -153,6 +156,7 @@ jobs:
           B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
           B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
           B2_BUCKET: ${{ secrets.B2_BUCKET }}
+          IA_ITEM: ${{ vars.IA_ITEM }}
         run: |
           set -euo pipefail
           sudo chroot "${CHROOT_DIR}" /usr/bin/su - builder -c \
@@ -160,6 +164,7 @@ jobs:
              B2_APPLICATION_KEY_ID="'"${B2_APPLICATION_KEY_ID}"'" \
              B2_APPLICATION_KEY="'"${B2_APPLICATION_KEY}"'" \
              B2_BUCKET="'"${B2_BUCKET}"'" \
+             OTA_IA_BASE_URL="'"https://archive.org/download/${IA_ITEM}"'" \
              ./build.sh'
 
       - name: Build ISO (create-iso.sh)
@@ -697,35 +702,45 @@ jobs:
             echo "::notice::IA_S3_ACCESS_KEY / IA_S3_SECRET_KEY / IA_ITEM not configured; skipping IA mirror"
             exit 0
           fi
-          ENDPOINT="https://s3.us.archive.org"
-          for f in "$BUNDLE" "$POINTER_DIR/latest.json" "$POINTER_DIR/latest.json.sig"; do
-            name=$(basename "$f")
-            python3 - "$ENDPOINT" "$IA_ITEM" "$name" "$IA_S3_ACCESS_KEY" "$IA_S3_SECRET_KEY" "$f" <<'PY'
-            import os, sys, urllib.request
+          python3 -m pip install -q --break-system-packages internetarchive 2>/dev/null || true
+          python3 - "$BUNDLE" "$POINTER_DIR" "$IA_ITEM" "$IA_S3_ACCESS_KEY" "$IA_S3_SECRET_KEY" <<'PY'
+          import os, sys, time
+          import internetarchive
 
-            endpoint, item, name, access, secret, path = sys.argv[1:]
-            url = f"{endpoint}/{item}/{name}"
+          BUNDLE, POINTER_DIR, ITEM, ACCESS, SECRET = sys.argv[1:]
+          files = [BUNDLE]
+          for f in ("latest.json", "latest.json.sig"):
+              p = os.path.join(POINTER_DIR, f)
+              if os.path.isfile(p):
+                  files.append(p)
 
-            # archive.org simple auth: Authorization: LOW <access>:<secret>
-            # (https://archive.org/developers/ias3.html). No HMAC signature
-            # needed in this mode. x-amz-auto-make-bucket creates the item on
-            # the first upload.
-            body = open(path, "rb")
-            req = urllib.request.Request(url, data=body, method="PUT")
-            req.add_header("Authorization", f"LOW {access}:{secret}")
-            req.add_header("x-amz-auto-make-bucket", "1")
-            req.add_header("Content-Type", "application/octet-stream")
-            try:
-                with urllib.request.urlopen(req, timeout=600) as r:
-                    print(f"IA upload {name} -> {r.status}")
-            except Exception as e:
-                print(f"IA upload failed for {name}: {e}", file=sys.stderr)
-                raise SystemExit(1)
-            finally:
-                body.close()
-            PY
-          done
-          echo "::notice::OTA bundle + pointer mirrored to IA item ${IA_ITEM}"
+          # internetarchive.upload uses the official IA-S3 client: it signs
+          # with Authorization: LOW <access>:<secret> (no HMAC), sets
+          # x-archive-auto-make-bucket to create the item on first upload,
+          # and follows the 307 redirects the IA-S3 endpoint likes to issue
+          # (Python urllib refuses to follow 307 for PUT). queue_derive=False
+          # skips the heavyweight derive task on binary OTA payloads.
+          for attempt in range(1, 6):
+              try:
+                  internetarchive.upload(
+                      ITEM,
+                      files=files,
+                      access_key=ACCESS,
+                      secret_key=SECRET,
+                      queue_derive=False,
+                      retries=3,
+                      retries_sleep=30,
+                      verbose=True,
+                  )
+                  break
+              except Exception as e:
+                  if attempt == 5:
+                      print(f"IA upload failed after 5 attempts: {e}", file=sys.stderr)
+                      raise SystemExit(1)
+                  print(f"IA upload attempt {attempt}/5 failed: {e}; retrying in 30s", file=sys.stderr)
+                  time.sleep(30)
+          print(f"::notice::OTA bundle + pointer mirrored to IA item {ITEM}")
+          PY
 
       - name: Generate shareable download link
         if: always()
