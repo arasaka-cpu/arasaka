@@ -1179,8 +1179,13 @@ configure_live_autologin() {
         usermod -aG render user 2>/dev/null || true
         # Live user password = "live" so sudo works interactively on the live
         # system. Keep autologin (no password needed to reach the desktop).
-        usermod -p "'"$LIVE_PW_HASH"'" user 2>/dev/null || true
-    '
+        # The hash is passed as $1 (a positional argument) rather than
+        # interpolated into this single-quoted string: the previous
+        # "'"$LIVE_PW_HASH"'" form left the hash inside double quotes in the
+        # inner shell, so $6 and $tcr (part of the crypt hash) were expanded
+        # and the stored password hash was silently corrupted.
+        usermod -p "$1" user 2>/dev/null || true
+    ' _ "$LIVE_PW_HASH"
 
     # Live + installed systems: let wheel members use sudo with their password.
     # (Main /etc/sudoers has no %wheel line, so nothing could sudo otherwise.)
