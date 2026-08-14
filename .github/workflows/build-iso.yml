@@ -689,6 +689,12 @@ jobs:
       # is a no-op when the IA secrets aren't configured.
       - name: Mirror OTA bundle + pointer to Internet Archive
         if: always()
+        # Best-effort mirror: B2 + GitHub Release remain the primary update
+        # sources, so a global Internet Archive task-queue overload (their
+        # "total_tasks_queued exceeds global_limit" throttle, which is
+        # account-agnostic) must not fail the whole build. The step checks
+        # IA's limit first and skips fast when throttled.
+        continue-on-error: true
         env:
           IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
           IA_S3_SECRET_KEY: ${{ secrets.IA_S3_SECRET_KEY }}
@@ -704,7 +710,7 @@ jobs:
           fi
           python3 -m pip install -q --break-system-packages internetarchive 2>/dev/null || true
           python3 - "$BUNDLE" "$POINTER_DIR" "$IA_ITEM" "$IA_S3_ACCESS_KEY" "$IA_S3_SECRET_KEY" <<'PY'
-          import os, sys, time
+          import json, os, sys, time, urllib.request
           import internetarchive
 
           BUNDLE, POINTER_DIR, ITEM, ACCESS, SECRET = sys.argv[1:]
@@ -713,6 +719,28 @@ jobs:
               p = os.path.join(POINTER_DIR, f)
               if os.path.isfile(p):
                   files.append(p)
+
+          # IA-S3 throttles uploads when its GLOBAL task queue is over budget
+          # ("total_tasks_queued exceeds global_limit"). That throttle is
+          # account-agnostic - our access key / bucket count are usually 0 -
+          # so there is no point hammering the endpoint or failing the build.
+          # Check the limit once up front and skip fast when rationing.
+          def ia_over_limit():
+              try:
+                  req = urllib.request.Request(
+                      "https://s3.us.archive.org/?check_limit=1",
+                      method="GET",
+                  )
+                  req.add_header("Authorization", f"LOW {ACCESS}:{SECRET}")
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      d = json.load(r)
+                      return bool(d.get("over_limit"))
+              except Exception:
+                  return True  # be conservative: skip if we cannot check
+
+          if ia_over_limit():
+              print("::warning::Internet Archive is globally throttled (check_limit over budget); skipping IA mirror - B2 + GitHub Release still distribute the update")
+              sys.exit(0)
 
           # internetarchive.upload uses the official IA-S3 client: it signs
           # with Authorization: LOW <access>:<secret> (no HMAC), sets
@@ -735,8 +763,8 @@ jobs:
                   break
               except Exception as e:
                   if attempt == 5:
-                      print(f"IA upload failed after 5 attempts: {e}", file=sys.stderr)
-                      raise SystemExit(1)
+                      print(f"::warning::IA upload failed after 5 attempts: {e} - B2 + GitHub Release still distribute the update")
+                      sys.exit(0)
                   print(f"IA upload attempt {attempt}/5 failed: {e}; retrying in 30s", file=sys.stderr)
                   time.sleep(30)
           print(f"::notice::OTA bundle + pointer mirrored to IA item {ITEM}")
