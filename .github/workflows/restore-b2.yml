@@ -55,36 +55,36 @@ jobs:
           set -euo pipefail
           cd /tmp/release
           for m in arasaka-*.iso.parts.json arasaka-*.raucb.parts.json; do
-            [ -f "$m" ] || { echo "no manifest $m"; exit 1; }
-            python3 - "$m" <<'PY'
-            import hashlib, json, os, sys
-            m = json.load(open(sys.argv[1]))
-            out = m["file"]
-            if os.path.exists(out):
-                print(f"using existing {out}")
-            else:
-                with open(out, "wb") as dst:
-                    for p in m["parts"]:
-                        with open(p, "rb") as src:
-                            while True:
-                                chunk = src.read(1 << 20)
-                                if not chunk:
-                                    break
-                                dst.write(chunk)
-                print(f"reassembled {out} from {len(m['parts'])} parts")
-            h = hashlib.sha256()
-            with open(out, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
-            got = h.hexdigest()
-            want = m["sha256"]
-            size = os.path.getsize(out)
-            if got != want:
-                raise SystemExit(f"sha256 mismatch for {out}: got {got} want {want}")
-            if size != m["total"]:
-                raise SystemExit(f"size mismatch for {out}: got {size} want {m['total']}")
-            print(f"verified {out}: sha256 {got[:12]}…, {m['total']} bytes")
-            PY
+          [ -f "$m" ] || { echo "no manifest $m"; exit 1; }
+          python3 - "$m" <<'PY'
+          import hashlib, json, os, sys
+          m = json.load(open(sys.argv[1]))
+          out = m["file"]
+          if os.path.exists(out):
+              print(f"using existing {out}")
+          else:
+              with open(out, "wb") as dst:
+                  for p in m["parts"]:
+                      with open(p, "rb") as src:
+                          while True:
+                              chunk = src.read(1 << 20)
+                              if not chunk:
+                                  break
+                              dst.write(chunk)
+              print(f"reassembled {out} from {len(m['parts'])} parts")
+          h = hashlib.sha256()
+          with open(out, "rb") as f:
+              for chunk in iter(lambda: f.read(1 << 20), b""):
+                  h.update(chunk)
+          got = h.hexdigest()
+          want = m["sha256"]
+          size = os.path.getsize(out)
+          if got != want:
+              raise SystemExit(f"sha256 mismatch for {out}: got {got} want {want}")
+          if size != m["total"]:
+              raise SystemExit(f"size mismatch for {out}: got {size} want {m['total']}")
+          print(f"verified {out}: sha256 {got[:12]}…, {m['total']} bytes")
+          PY
           done
 
       - name: Upload ISO to Backblaze B2
