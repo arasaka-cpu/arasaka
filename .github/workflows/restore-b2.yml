@@ -1,0 +1,154 @@
+# Restore the Backblaze B2 mirrors from the latest rolling GitHub Release.
+#
+# The main build-iso workflow uploads the ISO and OTA bundle to B2, but a
+# transient network drop can leave the buckets degraded (e.g. run
+# 31819490064: the old ISO/bundle were deleted before the new upload failed,
+# leaving both buckets empty). Because B2 secrets only exist in GitHub
+# Actions, this workflow re-pushes the artifacts of the current rolling
+# release to B2, without rebuilding anything:
+#
+#   1. download the release assets (ISO + bundle split into 1 GiB parts plus
+#      their .parts.json manifests, and the signed update pointer),
+#   2. reassemble the ISO and bundle, verifying each against its sha256
+#      manifest,
+#   3. upload them to B2 with the same resumable b2-upload.py helper used by
+#      the main workflow (upload-before-delete, so B2 is never left empty),
+#   4. upload the signed pointer last.
+#
+# Required repo secrets: B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET
+#                        B2_UPDATES_APPLICATION_KEY_ID, B2_UPDATES_APPLICATION_KEY, B2_UPDATES_BUCKET
+
+name: Restore Backblaze B2 mirrors
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "GitHub release tag to mirror (default: rolling)"
+        required: false
+        default: rolling
+
+permissions:
+  contents: read
+
+jobs:
+  restore-b2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/release
+          gh release download "$RELEASE" --dir /tmp/release --clobber
+          echo "Downloaded assets:"
+          ls -lh /tmp/release
+
+      - name: Reassemble ISO and bundle from parts
+        run: |
+          set -euo pipefail
+          cd /tmp/release
+          for m in arasaka-*.iso.parts.json arasaka-*.raucb.parts.json; do
+            [ -f "$m" ] || { echo "no manifest $m"; exit 1; }
+            python3 - "$m" <<'PY'
+            import hashlib, json, os, sys
+            m = json.load(open(sys.argv[1]))
+            out = m["file"]
+            if os.path.exists(out):
+                print(f"using existing {out}")
+            else:
+                with open(out, "wb") as dst:
+                    for p in m["parts"]:
+                        with open(p, "rb") as src:
+                            while True:
+                                chunk = src.read(1 << 20)
+                                if not chunk:
+                                    break
+                                dst.write(chunk)
+                print(f"reassembled {out} from {len(m['parts'])} parts")
+            h = hashlib.sha256()
+            with open(out, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            got = h.hexdigest()
+            want = m["sha256"]
+            size = os.path.getsize(out)
+            if got != want:
+                raise SystemExit(f"sha256 mismatch for {out}: got {got} want {want}")
+            if size != m["total"]:
+                raise SystemExit(f"size mismatch for {out}: got {size} want {m['total']}")
+            print(f"verified {out}: sha256 {got[:12]}…, {m['total']} bytes")
+            PY
+          done
+
+      - name: Upload ISO to Backblaze B2
+        env:
+          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET: ${{ secrets.B2_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$B2_APPLICATION_KEY_ID" ] || [ -z "$B2_APPLICATION_KEY" ] || [ -z "$B2_BUCKET" ]; then
+            echo "::error::B2 secrets not configured. Add B2_APPLICATION_KEY_ID, B2_APPLICATION_KEY, B2_BUCKET."
+            exit 1
+          fi
+          NEW=$(ls /tmp/release/arasaka-*.iso | head -1)
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/b2-upload.py" \
+            --key-id "$B2_APPLICATION_KEY_ID" \
+            --key "$B2_APPLICATION_KEY" \
+            --bucket "$B2_BUCKET" \
+            --file "$NEW" \
+            --name "$(basename "$NEW")" \
+            --prune-prefix "arasaka-" \
+            --prune-glob "arasaka-*.iso" \
+            --keep-newest 1 \
+            --cancel-unfinished
+
+      - name: Upload OTA bundle + pointer to Backblaze B2
+        env:
+          B2_UPDATES_APPLICATION_KEY_ID: ${{ secrets.B2_UPDATES_APPLICATION_KEY_ID }}
+          B2_UPDATES_APPLICATION_KEY: ${{ secrets.B2_UPDATES_APPLICATION_KEY }}
+          B2_UPDATES_BUCKET: ${{ secrets.B2_UPDATES_BUCKET }}
+        run: |
+          set -euo pipefail
+          BUNDLE=$(ls /tmp/release/arasaka-*.raucb 2>/dev/null | head -1 || true)
+          [ -n "$BUNDLE" ] || { echo "no bundle in release; skipping OTA upload"; exit 0; }
+          if [ -z "$B2_UPDATES_APPLICATION_KEY_ID" ] || [ -z "$B2_UPDATES_APPLICATION_KEY" ] || [ -z "$B2_UPDATES_BUCKET" ]; then
+            echo "::error::B2_UPDATES secrets not configured. Add B2_UPDATES_APPLICATION_KEY_ID, B2_UPDATES_APPLICATION_KEY, B2_UPDATES_BUCKET."
+            exit 1
+          fi
+          SCRIPT="${GITHUB_WORKSPACE}/.github/scripts/b2-upload.py"
+          echo "uploading bundle first, pointer last"
+          python3 "$SCRIPT" \
+            --key-id "$B2_UPDATES_APPLICATION_KEY_ID" \
+            --key "$B2_UPDATES_APPLICATION_KEY" \
+            --bucket "$B2_UPDATES_BUCKET" \
+            --file "$BUNDLE" \
+            --name "update/stable/$(basename "$BUNDLE")" \
+            --prune-prefix "update/stable/" \
+            --prune-glob "*.raucb" \
+            --keep-newest 1 \
+            --cancel-unfinished
+          for f in latest.json latest.json.sig; do
+            if [ -f "/tmp/release/$f" ]; then
+              python3 "$SCRIPT" \
+                --key-id "$B2_UPDATES_APPLICATION_KEY_ID" \
+                --key "$B2_UPDATES_APPLICATION_KEY" \
+                --bucket "$B2_UPDATES_BUCKET" \
+                --file "/tmp/release/$f" \
+                --name "update/stable/$f" \
+                --content-type "application/json" \
+                --prune-prefix "update/stable/" \
+                --prune-glob "$f" \
+                --keep-newest 1
+            else
+              echo "no $f in release; skipping"
+            fi
+          done
+          echo "::notice::OTA bundle + pointer restored to B2 bucket $B2_UPDATES_BUCKET"

@@ -386,9 +386,12 @@ jobs:
 
       # rclone's copy() does a HEAD check via the B2 *download* host, which
       # intermittently 403s from runner egress IPs (Unknown 403) and aborts the
-      # upload before it starts. The native B2 API (authorize -> get_upload_url
-      # -> upload) uses the api + upload hosts only, never the download host,
-      # so it is not subject to that block.
+      # upload before it starts. The native B2 API (authorize -> upload) uses
+      # the api + upload hosts only, never the download host, so it is not
+      # subject to that block. Uploads use the resumable large-file API so a
+      # mid-transfer TLS drop only re-sends the failed ~100 MB part, and the
+      # new file is uploaded and finished BEFORE old versions are deleted (see
+      # b2-upload.py).
       - name: Upload ISO to Backblaze B2
         env:
           B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
@@ -401,141 +404,23 @@ jobs:
             exit 1
           fi
           NEW=$(ls "${GITHUB_WORKSPACE}"/arasaka-*.iso | head -1)
-          echo "Uploading ${NEW} to B2 bucket ${B2_BUCKET} via native API"
-          python3 - "$NEW" <<'PY'
-          import hashlib, json, os, subprocess, sys, time
-          
-          ISO = sys.argv[1]
-          KEY_ID = os.environ["B2_APPLICATION_KEY_ID"]
-          KEY = os.environ["B2_APPLICATION_KEY"]
-          BUCKET = os.environ["B2_BUCKET"]
-          
-          def curl_json(args, data=None, body=None):
-              cmd = ["curl", "-sS"] + args + ["-w", "\n%{http_code}"]
-              if data is not None:
-                  cmd += ["--data-binary", data]
-              r = subprocess.run(cmd, input=body, capture_output=True)
-              out = r.stdout.decode(errors="replace")
-              code = out.rsplit("\n", 1)[-1].strip() if out else ""
-              if r.returncode != 0 or not code.startswith("2"):
-                  print("curl request failed:", r.stderr.decode(errors="replace"),
-                        "http", code, "body:", out[:600], file=sys.stderr)
-                  raise subprocess.CalledProcessError(
-                      r.returncode if r.returncode else int(code), r.args,
-                      (r.stderr + r.stdout)[:800])
-              return json.loads(out.rsplit("\n", 1)[0])
-          
-          def retry(fn, n=4, delay=5):
-              for i in range(n):
-                  try:
-                      return fn()
-                  except (subprocess.CalledProcessError, json.JSONDecodeError,
-                          OSError, http.client.HTTPException):
-                      if i == n - 1:
-                          raise
-                      time.sleep(delay)
-          
-          auth = retry(lambda: curl_json(["-u", f"{KEY_ID}:{KEY}",
-              "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"]))
-          token = auth["authorizationToken"]
-          auth_info = auth.get("apiInfo") or {}
-          api_url = (auth.get("apiUrl") or auth_info.get("apiUrl")
-              or (auth_info.get("storageApi") or {}).get("apiUrl"))
-          if not api_url:
-              raise SystemExit("cannot find apiUrl in authorize response: "
-                               + json.dumps(auth)[:400])
-          print(f"authorized: api={api_url}")
-          
-          # Bucket-restricted app keys get 401 from list_buckets unless the
-          # request names the bucket (see b2_list_buckets docs).
-          buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_list_buckets",
-              "--data-binary", json.dumps({"accountId": auth.get("accountId", ""),
-                                           "bucketName": BUCKET})]))
-          bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
-          print(f"bucket {BUCKET} id {bucket_id}")
-          
-          file_name = os.path.basename(ISO)
-
-          # Get upload URL
-          up = curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_get_upload_url",
-              "--data-binary", json.dumps({"bucketId": bucket_id})])
-          up_token = (up.get("uploadAuthorizationToken") or up.get("authorizationToken"))
-          if not up_token:
-              raise SystemExit("no token in get_upload_url response: " + json.dumps(up)[:400])
-
-          # Compute the SHA-1 by streaming over the file (constant memory).
-          sha1 = hashlib.sha1()
-          with open(ISO, "rb") as src:
-              for chunk in iter(lambda: src.read(1 << 20), b""):
-                  sha1.update(chunk)
-
-          # Keep only one ISO in the bucket: the free-tier storage cap makes a
-          # second 5 GB ISO push the bucket over the limit (old + new + the
-          # GE-Proton assets), so any existing arasaka-*.iso MUST be deleted
-          # BEFORE the new ISO is uploaded. A failed upload therefore leaves no
-          # ISO behind — a fresh run will simply upload the new one.
-          existing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_list_file_names",
-              "--data-binary", json.dumps({"bucketId": bucket_id,
-                                           "prefix": "arasaka-",
-                                           "maxFileCount": 1000})]))
-          for f in existing.get("files", []):
-              print(f"removing old ISO {f['fileName']} ({f['fileId']})")
-              curl_json(["-H", f"Authorization: {token}",
-                  f"{api_url}/b2api/v3/b2_delete_file_version",
-                  "--data-binary", json.dumps({"fileName": f["fileName"],
-                                               "fileId": f["fileId"]})])
-
-          # Upload with http.client, which streams the file body in 8 KiB
-          # blocks instead of buffering it (curl --data-binary spools the whole
-          # ISO to memory and OOMs on the 5 GB file).
-          import http.client, urllib.parse
-          u = urllib.parse.urlsplit(up["uploadUrl"])
-
-          def do_upload():
-              conn = http.client.HTTPSConnection(u.hostname, timeout=3600)
-              headers = {
-                  "Authorization": up_token,
-                  "X-Bz-File-Name": urllib.parse.quote(file_name, safe=""),
-                  "X-Bz-Content-Sha1": sha1.hexdigest(),
-                  "Content-Type": "application/octet-stream",
-                  "Content-Length": str(os.path.getsize(ISO)),
-              }
-              with open(ISO, "rb") as src:
-                  conn.request("POST", u.path, body=src, headers=headers)
-              resp = conn.getresponse()
-              body = resp.read()
-              conn.close()
-              if resp.status != 200:
-                  raise subprocess.CalledProcessError(
-                      resp.status, "b2_upload_file",
-                      body.decode(errors="replace")[:600])
-              return json.loads(body)
-
-          result = retry(do_upload)
-          print(f"uploaded {file_name} ({result.get('contentLength')} bytes) fileId {result['fileId']}")
-          
-          # Safety net: ensure only the newest ISO remains (should already be
-          # the case since we delete old ISOs before upload).
-          listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_list_file_names",
-              "--data-binary", json.dumps({"bucketId": bucket_id, "prefix": "arasaka-",
-                                           "maxFileCount": 1000})]))
-          files = sorted(listing["files"], key=lambda f: f.get("uploadTimestamp", 0), reverse=True)
-          for f in files[1:]:
-              print(f"removing old ISO {f['fileName']}")
-              curl_json(["-H", f"Authorization: {token}",
-                  f"{api_url}/b2api/v3/b2_delete_file_version",
-                  "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})])
-          print(f"::notice::ISO uploaded to Backblaze B2 bucket {BUCKET}")
-          PY
+          echo "Uploading ${NEW} to B2 bucket ${B2_BUCKET} via resumable native API"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/b2-upload.py" \
+            --key-id "$B2_APPLICATION_KEY_ID" \
+            --key "$B2_APPLICATION_KEY" \
+            --bucket "$B2_BUCKET" \
+            --file "$NEW" \
+            --name "$(basename "$NEW")" \
+            --prune-prefix "arasaka-" \
+            --prune-glob "arasaka-*.iso" \
+            --keep-newest 1 \
+            --cancel-unfinished
 
       # Upload the signed OTA bundle and update pointer to the updates bucket
       # (B2_UPDATES_BUCKET, e.g. arasaka-updates). The bundle is uploaded
       # first and the signed latest.json pointer LAST, so devices can never
-      # resolve a pointer to a half-uploaded bundle.
+      # resolve a pointer to a half-uploaded bundle. Each file is uploaded via
+      # the resumable b2-upload.py helper (see that file for the rationale).
       - name: Upload OTA bundle + pointer to Backblaze B2
         if: always()
         env:
@@ -551,136 +436,35 @@ jobs:
             echo "::error::B2_UPDATES secrets not configured. Add B2_UPDATES_APPLICATION_KEY_ID, B2_UPDATES_APPLICATION_KEY, B2_UPDATES_BUCKET."
             exit 1
           fi
-          python3 - "$BUNDLE" "$POINTER" <<'PY'
-          import hashlib, json, os, subprocess, sys, time, urllib.parse
-
-          BUNDLE, POINTER = sys.argv[1], sys.argv[2]
-          KEY_ID = os.environ["B2_UPDATES_APPLICATION_KEY_ID"]
-          KEY = os.environ["B2_UPDATES_APPLICATION_KEY"]
-          BUCKET = os.environ["B2_UPDATES_BUCKET"]
-          PREFIX = "update/stable/"
-
-          def curl_json(args, data=None, body=None):
-              cmd = ["curl", "-sS"] + args + ["-w", "\n%{http_code}"]
-              if data is not None:
-                  cmd += ["--data-binary", data]
-              r = subprocess.run(cmd, input=body, capture_output=True)
-              out = r.stdout.decode(errors="replace")
-              code = out.rsplit("\n", 1)[-1].strip() if out else ""
-              if r.returncode != 0 or not code.startswith("2"):
-                  print("curl request failed:", r.stderr.decode(errors="replace"),
-                        "http", code, "body:", out[:600], file=sys.stderr)
-                  raise subprocess.CalledProcessError(
-                      r.returncode if r.returncode else int(code), r.args,
-                      (r.stderr + r.stdout)[:800])
-              return json.loads(out.rsplit("\n", 1)[0])
-
-          def retry(fn, n=4, delay=5):
-              for i in range(n):
-                  try:
-                      return fn()
-                  except (subprocess.CalledProcessError, json.JSONDecodeError,
-                          OSError, http.client.HTTPException):
-                      if i == n - 1:
-                          raise
-                      time.sleep(delay)
-
-          auth = retry(lambda: curl_json(["-u", f"{KEY_ID}:{KEY}",
-              "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"]))
-          token = auth["authorizationToken"]
-          auth_info = auth.get("apiInfo") or {}
-          api_url = (auth.get("apiUrl") or auth_info.get("apiUrl")
-              or (auth_info.get("storageApi") or {}).get("apiUrl"))
-          if not api_url:
-              raise SystemExit("cannot find apiUrl: " + json.dumps(auth)[:400])
-          print(f"authorized: api={api_url}")
-
-          # Bucket-restricted app keys get 401/404 from b2_get_bucket_by_name
-          # (it does not work for restricted keys in practice). Resolve the
-          # bucket with b2_list_buckets filtered by bucketName instead — the
-          # same method used by the ISO upload above, which the restricted key
-          # is authorized to perform.
-          buckets = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_list_buckets",
-              "--data-binary", json.dumps({"accountId": auth.get("accountId", ""),
-                                           "bucketName": BUCKET})]))
-          bucket_id = next(b["bucketId"] for b in buckets["buckets"] if b["bucketName"] == BUCKET)
-          print(f"bucket {BUCKET} id {bucket_id}")
-
-          up = curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_get_upload_url",
-              "--data-binary", json.dumps({"bucketId": bucket_id})])
-          up_token = up.get("uploadAuthorizationToken") or up.get("authorizationToken")
-          if not up_token:
-              raise SystemExit("no token in get_upload_url: " + json.dumps(up)[:400])
-
-          def sha1_of(path):
-              h = hashlib.sha1()
-              with open(path, "rb") as src:
-                  for chunk in iter(lambda: src.read(1 << 20), b""):
-                      h.update(chunk)
-              return h.hexdigest()
-
-          import http.client, urllib.parse
-          u = urllib.parse.urlsplit(up["uploadUrl"])
-
-          def upload_file(local_path, b2_name):
-              with open(local_path, "rb") as src:
-                  size = os.path.getsize(local_path)
-                  conn = http.client.HTTPSConnection(u.hostname, timeout=3600)
-                  headers = {
-                      "Authorization": up_token,
-                      "X-Bz-File-Name": urllib.parse.quote(b2_name, safe=""),
-                      "X-Bz-Content-Sha1": sha1_of(local_path),
-                      "Content-Type": "application/octet-stream",
-                      "Content-Length": str(size),
-                  }
-                  conn.request("POST", u.path, body=src, headers=headers)
-                  resp = conn.getresponse()
-                  body = resp.read()
-                  conn.close()
-                  if resp.status != 200:
-                      raise subprocess.CalledProcessError(
-                          resp.status, "b2_upload_file", body.decode(errors="replace")[:600])
-                  print(f"uploaded {b2_name} ({size} bytes)")
-                  return json.loads(body)
-
-          def replace_existing(b2_name):
-              existing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-                  f"{api_url}/b2api/v3/b2_list_file_names",
-                  "--data-binary", json.dumps({"bucketId": bucket_id, "prefix": b2_name})]))
-              for f in existing.get("files", []):
-                  print(f"replacing existing {f['fileName']}")
-                  curl_json(["-H", f"Authorization: {token}",
-                      f"{api_url}/b2api/v3/b2_delete_file_version",
-                      "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})])
-
-          bundle_name = PREFIX + os.path.basename(BUNDLE)
-          print("uploading bundle first, pointer last")
-          replace_existing(bundle_name)
-          retry(lambda: upload_file(BUNDLE, bundle_name))
-
-          # Keep only the newest OTA bundle. Bundle names are versioned, so
-          # they would otherwise accumulate in the bucket forever; the pointer
-          # only ever references the newest one, and old bundles are dead
-          # weight. Never delete the just-uploaded bundle.
-          listing = retry(lambda: curl_json(["-H", f"Authorization: {token}",
-              f"{api_url}/b2api/v3/b2_list_file_names",
-              "--data-binary", json.dumps({"bucketId": bucket_id, "prefix": PREFIX,
-                                           "maxFileCount": 1000})]))
-          bundles = [f for f in listing["files"] if f["fileName"].endswith(".raucb")]
-          for f in sorted(bundles, key=lambda f: f.get("uploadTimestamp", 0), reverse=True)[1:]:
-              print(f"removing old OTA bundle {f['fileName']}")
-              curl_json(["-H", f"Authorization: {token}",
-                  f"{api_url}/b2api/v3/b2_delete_file_version",
-                  "--data-binary", json.dumps({"fileName": f["fileName"], "fileId": f["fileId"]})])
-
-          for f in ("latest.json", "latest.json.sig"):
-              b2_name = PREFIX + f
-              replace_existing(b2_name)
-              retry(lambda: upload_file(os.path.join(os.path.dirname(POINTER), f), b2_name))
-          print(f"::notice::OTA bundle + pointer uploaded to B2 bucket {BUCKET} under {PREFIX}")
-          PY
+          SCRIPT="${GITHUB_WORKSPACE}/.github/scripts/b2-upload.py"
+          BUNDLE_NAME="update/stable/$(basename "$BUNDLE")"
+          echo "uploading bundle first, pointer last"
+          # Bundle: resumable large-file upload, then prune to the newest one.
+          python3 "$SCRIPT" \
+            --key-id "$B2_UPDATES_APPLICATION_KEY_ID" \
+            --key "$B2_UPDATES_APPLICATION_KEY" \
+            --bucket "$B2_UPDATES_BUCKET" \
+            --file "$BUNDLE" \
+            --name "$BUNDLE_NAME" \
+            --prune-prefix "update/stable/" \
+            --prune-glob "*.raucb" \
+            --keep-newest 1 \
+            --cancel-unfinished
+          # Pointer: replace last, so a pointer never resolves to a
+          # half-uploaded bundle. Same-name versions are pruned to one.
+          for f in latest.json latest.json.sig; do
+            python3 "$SCRIPT" \
+              --key-id "$B2_UPDATES_APPLICATION_KEY_ID" \
+              --key "$B2_UPDATES_APPLICATION_KEY" \
+              --bucket "$B2_UPDATES_BUCKET" \
+              --file "${GITHUB_WORKSPACE}/pointer/$f" \
+              --name "update/stable/$f" \
+              --content-type "application/json" \
+              --prune-prefix "update/stable/" \
+              --prune-glob "$f" \
+              --keep-newest 1
+          done
+          echo "::notice::OTA bundle + pointer uploaded to B2 bucket $B2_UPDATES_BUCKET under update/stable/"
 
       # Mirror the OTA bundle + signed pointer to an Internet Archive item so
       # devices have a third, effectively-unmetered source (IA_BASE_URL in

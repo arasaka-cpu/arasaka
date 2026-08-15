@@ -13,3 +13,4 @@ ovmf_vars.fd
 # --- misc ---
 *.log
 .DS_Store
+.github/scripts/__pycache__/
