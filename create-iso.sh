@@ -275,9 +275,9 @@ build_bootloader() {
 
     wtee "${ISO_DIR}/loader/loader.conf" >/dev/null << 'LOADEREOF'
 default arasaka.conf
-timeout 3
+timeout 0
 console-mode auto
-editor yes
+editor no
 LOADEREOF
 
     wtee "${ISO_DIR}/loader/entries/arasaka.conf" >/dev/null << ENTRYEOF
@@ -285,6 +285,13 @@ title   Arasaka Live (Calamares Installer)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
 options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 quiet splash copytoram=n
+ENTRYEOF
+
+    wtee "${ISO_DIR}/loader/entries/arasaka-verbose.conf" >/dev/null << ENTRYEOF
+title   Arasaka Live (Verbose Boot)
+linux   /boot/${kname}
+initrd  /boot/${imgname}
+options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=5 copytoram=n
 ENTRYEOF
 }
 
@@ -390,9 +397,9 @@ build_efiboot() {
     mkdir -p "${tmpdir}/loader/entries"
     wtee "${tmpdir}/loader/loader.conf" >/dev/null << 'LOADEREOF'
 default arasaka.conf
-timeout 3
+timeout 0
 console-mode auto
-editor yes
+editor no
 LOADEREOF
     wtee "${tmpdir}/loader/entries/arasaka.conf" >/dev/null << ENTRYEOF
 title   Arasaka Live (Calamares Installer)
@@ -400,10 +407,17 @@ linux   /boot/${kname}
 initrd  /boot/${imgname}
 options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 quiet splash copytoram=n
 ENTRYEOF
+    wtee "${tmpdir}/loader/entries/arasaka-verbose.conf" >/dev/null << ENTRYEOF
+title   Arasaka Live (Verbose Boot)
+linux   /boot/${kname}
+initrd  /boot/${imgname}
+options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=5 copytoram=n
+ENTRYEOF
     run_quiet mmd -i "$efi_img" ::/loader
     run_quiet mmd -i "$efi_img" ::/loader/entries
     run_quiet mcopy -i "$efi_img" "${tmpdir}/loader/loader.conf" ::/loader/loader.conf
     run_quiet mcopy -i "$efi_img" "${tmpdir}/loader/entries/arasaka.conf" ::/loader/entries/arasaka.conf
+    run_quiet mcopy -i "$efi_img" "${tmpdir}/loader/entries/arasaka-verbose.conf" ::/loader/entries/arasaka-verbose.conf
     run_quiet mmd -i "$efi_img" ::/boot
     run_quiet mcopy -i "$efi_img" "$ksrc" "::/boot/${kname}"
     run_quiet mcopy -i "$efi_img" "$isrc" "::/boot/${imgname}"
