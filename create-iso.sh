@@ -275,9 +275,9 @@ build_bootloader() {
 
     wtee "${ISO_DIR}/loader/loader.conf" >/dev/null << 'LOADEREOF'
 default arasaka.conf
-timeout 0
+timeout 3
 console-mode auto
-editor no
+editor yes
 LOADEREOF
 
     wtee "${ISO_DIR}/loader/entries/arasaka.conf" >/dev/null << ENTRYEOF
@@ -308,7 +308,7 @@ build_initramfs() {
     # the memdiskfind binary from syslinux that we do not ship)
     run_quiet mkdir -p "${ISO_DIR}/arch/x86_64/airootfs/etc/mkinitcpio.conf.d"
     wtee "${ISO_DIR}/arch/x86_64/airootfs/etc/mkinitcpio.conf.d/archiso.conf" >/dev/null << 'ARCHISOCONF'
-MODULES=(loop squashfs nouveau i915 amdgpu)
+MODULES=(loop squashfs nouveau i915 amdgpu virtio-gpu virtio-drm)
 HOOKS=(base udev plymouth microcode modconf kms archiso archiso_loop_mnt archiso_pxe_common archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs block filesystems keyboard)
 ARCHISOCONF
 
@@ -390,9 +390,9 @@ build_efiboot() {
     mkdir -p "${tmpdir}/loader/entries"
     wtee "${tmpdir}/loader/loader.conf" >/dev/null << 'LOADEREOF'
 default arasaka.conf
-timeout 0
+timeout 3
 console-mode auto
-editor no
+editor yes
 LOADEREOF
     wtee "${tmpdir}/loader/entries/arasaka.conf" >/dev/null << ENTRYEOF
 title   Arasaka Live (Calamares Installer)
