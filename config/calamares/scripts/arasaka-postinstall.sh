@@ -180,7 +180,7 @@ if [ -f "${TARGET}/etc/mkinitcpio.conf" ]; then
     sed -i -E 's/^HOOKS=\(.*\)$/HOOKS=(base udev plymouth autodetect microcode modconf kms keyboard keymap consolefont block arasaka-verity filesystems fsck arasaka-ab)/' \
         "${TARGET}/etc/mkinitcpio.conf"
     if ! grep -q '^MODULES=' "${TARGET}/etc/mkinitcpio.conf"; then
-        printf 'MODULES=(dm-mod dm-verity squashfs overlay btrfs)\n' >> "${TARGET}/etc/mkinitcpio.conf"
+        printf 'MODULES=(dm-mod dm-verity squashfs overlay btrfs nouveau i915 amdgpu)\n' >> "${TARGET}/etc/mkinitcpio.conf"
     fi
 fi
 echo "[arasaka-postinstall] Regenerating initramfs in target..."

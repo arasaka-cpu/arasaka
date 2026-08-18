@@ -305,7 +305,7 @@ CRYPTEOF
     sudo sed -i -E 's/^HOOKS=\(.*\)$/HOOKS=(base udev plymouth autodetect microcode modconf kms keyboard keymap consolefont block arasaka-verity filesystems fsck arasaka-ab)/' \
         "${mnt}/slot-a/etc/mkinitcpio.conf"
     if ! grep -q '^MODULES=' "${mnt}/slot-a/etc/mkinitcpio.conf"; then
-        printf 'MODULES=(dm-mod dm-verity squashfs overlay btrfs)\n' | sudo tee -a "${mnt}/slot-a/etc/mkinitcpio.conf" >/dev/null
+        printf 'MODULES=(dm-mod dm-verity squashfs overlay btrfs nouveau i915 amdgpu)\n' | sudo tee -a "${mnt}/slot-a/etc/mkinitcpio.conf" >/dev/null
     fi
     for d in proc sys dev run; do
         sudo mount --bind "/${d}" "${mnt}/slot-a/${d}" 2>/dev/null || true

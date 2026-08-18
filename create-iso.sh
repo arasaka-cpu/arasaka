@@ -308,7 +308,7 @@ build_initramfs() {
     # the memdiskfind binary from syslinux that we do not ship)
     run_quiet mkdir -p "${ISO_DIR}/arch/x86_64/airootfs/etc/mkinitcpio.conf.d"
     wtee "${ISO_DIR}/arch/x86_64/airootfs/etc/mkinitcpio.conf.d/archiso.conf" >/dev/null << 'ARCHISOCONF'
-MODULES=(loop squashfs)
+MODULES=(loop squashfs nouveau i915 amdgpu)
 HOOKS=(base udev plymouth microcode modconf kms archiso archiso_loop_mnt archiso_pxe_common archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs block filesystems keyboard)
 ARCHISOCONF
 
