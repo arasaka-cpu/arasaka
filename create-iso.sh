@@ -291,7 +291,14 @@ ENTRYEOF
 title   Arasaka Live (Verbose Boot)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=5 copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 drm.debug=0x02 copytoram=n
+ENTRYEOF
+
+    wtee "${ISO_DIR}/loader/entries/arasaka-safe.conf" >/dev/null << ENTRYEOF
+title   Arasaka Live (Safe Graphics)
+linux   /boot/${kname}
+initrd  /boot/${imgname}
+options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 nomodeset rd.systemd.unit=multi-user.target copytoram=n
 ENTRYEOF
 }
 
@@ -411,13 +418,20 @@ ENTRYEOF
 title   Arasaka Live (Verbose Boot)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=5 copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 drm.debug=0x02 copytoram=n
+ENTRYEOF
+    wtee "${tmpdir}/loader/entries/arasaka-safe.conf" >/dev/null << ENTRYEOF
+title   Arasaka Live (Safe Graphics)
+linux   /boot/${kname}
+initrd  /boot/${imgname}
+options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 nomodeset rd.systemd.unit=multi-user.target copytoram=n
 ENTRYEOF
     run_quiet mmd -i "$efi_img" ::/loader
     run_quiet mmd -i "$efi_img" ::/loader/entries
     run_quiet mcopy -i "$efi_img" "${tmpdir}/loader/loader.conf" ::/loader/loader.conf
     run_quiet mcopy -i "$efi_img" "${tmpdir}/loader/entries/arasaka.conf" ::/loader/entries/arasaka.conf
     run_quiet mcopy -i "$efi_img" "${tmpdir}/loader/entries/arasaka-verbose.conf" ::/loader/entries/arasaka-verbose.conf
+    run_quiet mcopy -i "$efi_img" "${tmpdir}/loader/entries/arasaka-safe.conf" ::/loader/entries/arasaka-safe.conf
     run_quiet mmd -i "$efi_img" ::/boot
     run_quiet mcopy -i "$efi_img" "$ksrc" "::/boot/${kname}"
     run_quiet mcopy -i "$efi_img" "$isrc" "::/boot/${imgname}"
