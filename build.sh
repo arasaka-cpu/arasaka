@@ -524,8 +524,8 @@ GPUEOF
         # both render AND video access. card0 requires video group (0660).
         # The live/installed desktop user gets it via
         # usermod in configure_live_autologin / Calamares defaultGroups.
-        usermod -aG render,video greeter 2>/dev/null || true
-        usermod -aG render,video cosmic-greeter 2>/dev/null || true
+        usermod -aG render,video,seat greeter 2>/dev/null || true
+        usermod -aG render,video,seat cosmic-greeter 2>/dev/null || true
 
         # Let RustiCL see every GPU by default (overridable per-user).
         mkdir -p /etc/environment.d
@@ -667,6 +667,7 @@ configure_systemd() {
         systemctl enable systemd-oomd
         systemctl enable NetworkManager
         systemctl enable cosmic-greeter
+        systemctl enable seatd
         systemctl enable flatpak-system-update
         systemctl enable systemd-zram-setup@zram0.service
 
@@ -1173,7 +1174,7 @@ configure_live_autologin() {
         # make the useradd -u 1000 below fail silently and leave the live ISO
         # without a usable "user" account (greetd -> USER_UNKNOWN -> boot hang).
         id builder &>/dev/null && userdel builder 2>/dev/null || true
-        useradd -m -u 1000 -g users -G wheel,video,render,audio,input,storage,power -s /usr/bin/zsh user 2>/dev/null || true
+        useradd -m -u 1000 -g users -G wheel,video,render,seat,audio,input,storage,power -s /usr/bin/zsh user 2>/dev/null || true
         # RESUME builds skip useradd (user exists) - grant render access anyway,
         # otherwise /dev/dri/renderD* (group render, 0660) is unusable and every
         # app falls back to software rendering.
