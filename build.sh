@@ -521,10 +521,11 @@ GPUEOF
         groupadd -f render
         groupadd -f video
         # Greeter users also render (greeter wallpaper/animations); grant them
-        # render access too. The live/installed desktop user gets it via
+        # both render AND video access. card0 requires video group (0660).
+        # The live/installed desktop user gets it via
         # usermod in configure_live_autologin / Calamares defaultGroups.
-        usermod -aG render greeter 2>/dev/null || true
-        usermod -aG render cosmic-greeter 2>/dev/null || true
+        usermod -aG render,video greeter 2>/dev/null || true
+        usermod -aG render,video cosmic-greeter 2>/dev/null || true
 
         # Let RustiCL see every GPU by default (overridable per-user).
         mkdir -p /etc/environment.d
@@ -1241,6 +1242,16 @@ user = "cosmic-greeter"
 command = "/usr/local/bin/arasaka-autologin.sh"
 user = "user"
 EOF
+
+    # Override the package-provided cosmic-greeter-start to LOG errors
+    # instead of swallowing them to /dev/null.  Critical for debugging
+    # black-screen issues on real hardware.
+    cat > "${ROOTFS}/usr/local/bin/cosmic-greeter-start" << 'GREETEREOF'
+#!/bin/sh
+rm -rf /run/cosmic-greeter/cosmic/com.system76.CosmicSettingsDaemon/v1/* > /dev/null 2>&1
+exec cosmic-comp cosmic-greeter > /tmp/cosmic-comp.log 2>&1
+GREETEREOF
+    run chmod 755 "${ROOTFS}/usr/local/bin/cosmic-greeter-start"
 }
 
 configure_firewall() {
