@@ -520,6 +520,7 @@ KERNEL=="renderD*", SUBSYSTEM=="drm", GROUP="render", MODE="0660", TAG+="uaccess
 GPUEOF
         groupadd -f render
         groupadd -f video
+        groupadd -f seat
         # Greeter users also render (greeter wallpaper/animations); grant them
         # both render AND video access. card0 requires video group (0660).
         # The live/installed desktop user gets it via
@@ -1246,11 +1247,20 @@ EOF
 
     # Override the package-provided cosmic-greeter-start to LOG errors
     # instead of swallowing them to /dev/null.  Critical for debugging
-    # black-screen issues on real hardware.
+    # black-screen issues on real hardware.  Retry on transient seatd
+    # failures (socket may not be ready yet on first attempt).
     cat > "${ROOTFS}/usr/local/bin/cosmic-greeter-start" << 'GREETEREOF'
 #!/bin/sh
 rm -rf /run/cosmic-greeter/cosmic/com.system76.CosmicSettingsDaemon/v1/* > /dev/null 2>&1
-exec cosmic-comp cosmic-greeter > /tmp/cosmic-comp.log 2>&1
+for delay in 1 2 4; do
+    sleep "$delay"
+    /usr/bin/dbus-run-session -- \
+        env XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=COSMIC \
+        cosmic-comp cosmic-greeter > /tmp/cosmic-comp.log 2>&1
+    # cosmic-comp exited — log and retry
+    echo "$(date) cosmic-comp exited (status=$?), retrying in ${delay}s..." >> /tmp/cosmic-comp.log
+done
+echo "$(date) FATAL: cosmic-comp failed after 4 retries" >> /tmp/cosmic-comp.log
 GREETEREOF
     run chmod 755 "${ROOTFS}/usr/local/bin/cosmic-greeter-start"
 }

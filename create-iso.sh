@@ -284,21 +284,21 @@ LOADEREOF
 title   Arasaka Live (Calamares Installer)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 quiet splash copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 quiet splash copytoram=n
 ENTRYEOF
 
     wtee "${ISO_DIR}/loader/entries/arasaka-verbose.conf" >/dev/null << ENTRYEOF
 title   Arasaka Live (Verbose Boot)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 drm.debug=0x02 copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 loglevel=7 drm.debug=0x02 copytoram=n
 ENTRYEOF
 
     wtee "${ISO_DIR}/loader/entries/arasaka-safe.conf" >/dev/null << ENTRYEOF
 title   Arasaka Live (Safe Graphics)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 nomodeset rd.systemd.unit=multi-user.target copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 loglevel=7 nomodeset systemd.unit=multi-user.target copytoram=n
 ENTRYEOF
 }
 
@@ -412,19 +412,19 @@ LOADEREOF
 title   Arasaka Live (Calamares Installer)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 quiet splash copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 quiet splash copytoram=n
 ENTRYEOF
     wtee "${tmpdir}/loader/entries/arasaka-verbose.conf" >/dev/null << ENTRYEOF
 title   Arasaka Live (Verbose Boot)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 drm.debug=0x02 copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 loglevel=7 drm.debug=0x02 copytoram=n
 ENTRYEOF
     wtee "${tmpdir}/loader/entries/arasaka-safe.conf" >/dev/null << ENTRYEOF
 title   Arasaka Live (Safe Graphics)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=ttyS0 console=tty0 loglevel=7 nomodeset rd.systemd.unit=multi-user.target copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 loglevel=7 nomodeset systemd.unit=multi-user.target copytoram=n
 ENTRYEOF
     run_quiet mmd -i "$efi_img" ::/loader
     run_quiet mmd -i "$efi_img" ::/loader/entries
