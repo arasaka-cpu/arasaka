@@ -676,14 +676,17 @@ configure_systemd() {
         # copied, because these unit files do not exist yet at this point.
 
         systemctl mask getty@tty1 2>/dev/null || true
-        # plymouth-quit-wait.service runs 'plymouth --wait' with TimeoutSec=0
-        # and blocks forever when plymouth never exits.  cosmic-greeter.service
-        # (display-manager.service) has After=plymouth-quit-wait.service, so the
-        # greeter never starts → black screen.  Mask all plymouth services:
-        # COSMIC desktop uses its own login manager (greetd), not plymouth.
+        # plymouth: COSMIC desktop uses greetd, not plymouth.
+        # Mask plymouth-start to prevent new instances.  Keep plymouth-quit
+        # unmasked so it can clean up the plymouthd started by the initramfs
+        # plymouth hook.  Override plymouth-quit-wait timeout from 0 (infinite)
+        # to 30s so boot never hangs if plymouthd is stuck.
         systemctl mask plymouth-start.service 2>/dev/null || true
-        systemctl mask plymouth-quit-wait.service 2>/dev/null || true
-        systemctl mask plymouth-quit.service 2>/dev/null || true
+        mkdir -p /etc/systemd/system/plymouth-quit-wait.service.d/
+        cat > /etc/systemd/system/plymouth-quit-wait.service.d/timeout.conf << 'PEOF'
+[Service]
+TimeoutSec=30
+PEOF
         rm -f /etc/profile.d/*.sh 2>/dev/null || true
 
         mkdir -p /etc/systemd/system.conf.d/
