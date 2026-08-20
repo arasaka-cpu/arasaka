@@ -5,7 +5,7 @@ After=local-fs.target arasaka-cryptdata.service
 # connections, CUPS printers) in before the greeter/session and their consumers
 # start so nothing ever races with the bind mounts. Also before snapd, flatpak
 # system updates and RAUC (which all read state that must come from /data).
-Before=display-manager.service cosmic-greeter.service NetworkManager.service cups.service snapd.service snapd.apparmor.service flatpak-system-update.service rauc.service
+Before=display-manager.service cosmic-greeter.service NetworkManager.service cups.service snapd.service flatpak-system-update.service rauc.service
 
 [Service]
 Type=oneshot
