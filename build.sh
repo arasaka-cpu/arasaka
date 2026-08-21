@@ -676,17 +676,12 @@ configure_systemd() {
         # copied, because these unit files do not exist yet at this point.
 
         systemctl mask getty@tty1 2>/dev/null || true
-        # plymouth: COSMIC desktop uses greetd, not plymouth.
-        # Mask plymouth-start to prevent new instances.  Keep plymouth-quit
-        # unmasked so it can clean up the plymouthd started by the initramfs
-        # plymouth hook.  Override plymouth-quit-wait timeout from 0 (infinite)
-        # to 30s so boot never hangs if plymouthd is stuck.
+        # plymouth: COSMIC desktop uses greetd (seatd), not plymouth.
+        # plymouth is removed from initramfs HOOKS so no plymouthd runs in
+        # early boot.  Mask all three plymouth services as belt-and-suspenders.
         systemctl mask plymouth-start.service 2>/dev/null || true
-        mkdir -p /etc/systemd/system/plymouth-quit-wait.service.d/
-        cat > /etc/systemd/system/plymouth-quit-wait.service.d/timeout.conf << 'PEOF'
-[Service]
-TimeoutSec=30
-PEOF
+        systemctl mask plymouth-quit.service 2>/dev/null || true
+        systemctl mask plymouth-quit-wait.service 2>/dev/null || true
         rm -f /etc/profile.d/*.sh 2>/dev/null || true
 
         mkdir -p /etc/systemd/system.conf.d/

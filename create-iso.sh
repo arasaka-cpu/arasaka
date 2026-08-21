@@ -284,7 +284,7 @@ LOADEREOF
 title   Arasaka Live (Calamares Installer)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=tty0 quiet splash copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 quiet copytoram=n
 ENTRYEOF
 
     wtee "${ISO_DIR}/loader/entries/arasaka-verbose.conf" >/dev/null << ENTRYEOF
@@ -322,8 +322,8 @@ build_initramfs() {
     # the memdiskfind binary from syslinux that we do not ship)
     run_quiet mkdir -p "${ISO_DIR}/arch/x86_64/airootfs/etc/mkinitcpio.conf.d"
     wtee "${ISO_DIR}/arch/x86_64/airootfs/etc/mkinitcpio.conf.d/archiso.conf" >/dev/null << 'ARCHISOCONF'
-MODULES=(loop squashfs nouveau i915 amdgpu virtio-gpu virtio-drm)
-HOOKS=(base udev plymouth microcode modconf kms archiso archiso_loop_mnt archiso_pxe_common archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs block filesystems keyboard)
+MODULES=(loop squashfs nouveau i915 amdgpu)
+HOOKS=(base udev microcode modconf kms archiso archiso_loop_mnt archiso_pxe_common archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs block filesystems keyboard)
 ARCHISOCONF
 
     # Preset that builds the archiso initramfs into /boot/initramfs-linux.img
@@ -412,7 +412,7 @@ LOADEREOF
 title   Arasaka Live (Calamares Installer)
 linux   /boot/${kname}
 initrd  /boot/${imgname}
-options archisobasedir=arch archisolabel=ARASAKA console=tty0 quiet splash copytoram=n
+options archisobasedir=arch archisolabel=ARASAKA console=tty0 quiet copytoram=n
 ENTRYEOF
     wtee "${tmpdir}/loader/entries/arasaka-verbose.conf" >/dev/null << ENTRYEOF
 title   Arasaka Live (Verbose Boot)
